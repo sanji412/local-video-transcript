@@ -171,17 +171,20 @@ class JobManager:
 
     def _spawn(self, payload, task_id):
         work = Path(payload["work_dir"])
+        payload["parent_pid"] = os.getpid()
         payload_path = work / "payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
         env["PYTHONUNBUFFERED"] = "1"
+        env["LOCAL_TRANSCRIPT_LOCK_FD"] = str(self._lockfile.fileno())
         self._process = subprocess.Popen(
             self._command_builder(payload_path),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             env=env,
+            pass_fds=(self._lockfile.fileno(),),
         )
         self._thread = threading.Thread(
             target=self._watch,

@@ -12,7 +12,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.tasks_dir, Path(directory) / "tasks")
             self.assertEqual(settings.model_dir, Path(directory) / "models" / "whisper")
             self.assertEqual(settings.max_upload_bytes, 500 * 1024 * 1024)
-            self.assertEqual(settings.max_duration, 600)
+            self.assertEqual(settings.max_duration, 1800)
 
     def test_frontend_directory_points_to_production_bundle(self):
         self.assertEqual(Settings().frontend_dir.name, "dist")

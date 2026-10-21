@@ -1,0 +1,4 @@
+"""Shared MVP media limits."""
+
+MAX_DURATION_SECONDS = 30 * 60
+MAX_MEDIA_BYTES = 500 * 1024 * 1024

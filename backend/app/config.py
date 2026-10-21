@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .limits import MAX_DURATION_SECONDS, MAX_MEDIA_BYTES
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -15,8 +17,8 @@ class Settings:
         )
     )
     frontend_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[2] / "frontend/dist")
-    max_upload_bytes: int = 500 * 1024 * 1024
-    max_duration: int = 600
+    max_upload_bytes: int = MAX_MEDIA_BYTES
+    max_duration: int = MAX_DURATION_SECONDS
     task_timeout: float = 900
     model_timeout: float = 7200
 
