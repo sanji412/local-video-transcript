@@ -1,0 +1,58 @@
+# 视频文案提取器
+
+在本机提取抖音口播、讲解视频的完整讲述稿，支持链接或 MP4 导入。使用 React + FastAPI + MLX Whisper，不调用在线转写服务。
+
+## 启动
+
+首版适用于 Apple 芯片 Mac。需要 macOS 14 或更新版本、uv、Node.js 22.12 或更新版本和 FFmpeg。通过 Homebrew 安装缺少的工具：
+
+```sh
+brew install uv node@22 ffmpeg
+```
+
+在项目目录运行：
+
+```sh
+./start.command
+```
+
+也可以在 Finder 中双击 `start.command`。首次运行下载 Python 依赖并构建界面，之后自动打开 [本地工作台](http://127.0.0.1:8765)。请保留终端窗口，按 Ctrl+C 停止服务。
+
+首次进入工作台，点击模型下载按钮，下载约 1.6 GB 的识别模型。模型下载及抖音视频获取需要联网；模型就绪后，导入本地 MP4 可以离线转写。音视频和文案不会上传到第三方。
+
+## 使用
+
+1. 粘贴一条抖音分享链接或整段分享内容，也可以切换为本地 MP4 导入。
+2. 点击提取，查看任务阶段；处理中可以取消。
+3. 校对完整文案，直接编辑，然后复制全文或导出 TXT。
+
+优先支持普通话、30 分钟以内、500 MB 以内的视频。有完整可获取字幕时优先采用，否则本地转写全段音频；画面中嵌入的字幕不会进行 OCR。语音转写可能与画面字幕有差异，术语等内容仍需校对。
+
+抖音可能限制下载，遇到失败可重试或将已保存的 MP4 导入。本工具不自动读取浏览器 Cookie。一次只处理一个任务，不提供跨会话历史；关闭页面前请自行保存文案。
+
+## 本地文件
+
+默认数据目录为 `~/Library/Application Support/LocalVideoTranscript/`，保存模型及工具的临时文件。任务完成、失败或取消后清理临时媒体，不删除用户原文件或已导出的文案。可通过 `TRANSCRIPT_DATA_DIR` 环境变量指定其他目录。
+
+同一数据目录只能运行一个服务实例。网页与 API 由本机 `127.0.0.1` 提供，不向局域网开放。
+
+## 开发与检查
+
+```sh
+uv sync --python 3.12 --locked --extra local
+npm ci --prefix frontend
+# 终端一：API
+.venv/bin/python -m app.launch --no-browser
+# 如使用 Homebrew 的 node@22，请先将其 bin 目录加入当前终端 PATH
+# export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+# 终端二：前端开发服务器
+npm run dev --prefix frontend
+# 自动化验证
+./scripts/check.sh
+```
+
+自动化测试不下载模型、不访问抖音。真实模型与视频验证另外记录在 [验证记录](docs/validation.md)，查看实际通过范围及限制。
+
+- [产品设计](docs/superpowers/specs/2026-10-21-video-transcript-mvp-design.md)
+- [技术方案](docs/technical-design.md)
+- [实现计划](docs/superpowers/plans/2026-10-21-mvp-implementation.md)
