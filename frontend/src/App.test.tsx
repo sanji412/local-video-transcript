@@ -14,7 +14,7 @@ beforeEach(() => {
   route = () => ready;
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     const url = String(input); requests.push({ url, init });
-    const value = url === '/api/session' ? session : await route(url, init);
+    const value = url === '/api/session' ? session : url.startsWith('/api/history?') ? {items:[]} : await route(url, init);
     return value instanceof Response ? value : new Response(JSON.stringify(value));
   }));
 });
@@ -61,7 +61,7 @@ describe('本地文案工作台', () => {
     expect(click).toHaveBeenCalled();
     const post = requests.find(r => r.url === '/api/tasks/link')!;
     expect(new Headers(post.init?.headers).get('X-Session-Token')).toBe('secret-token');
-    expect(JSON.parse(post.init?.body as string)).toEqual({ share_text: '看看 https://v.douyin.com/abc/' });
+    expect(JSON.parse(post.init?.body as string)).toEqual({ share_text: '看看 https://v.douyin.com/abc/', mode: 'accurate' });
     click.mockRestore();
   });
 
@@ -69,14 +69,14 @@ describe('本地文案工作台', () => {
     const user = userEvent.setup();
     session.model = { status: 'missing', detail: '首次使用需要下载模型', progress: null };
     let polls = 0;
-    route = (url) => url === '/api/model/download' ? { status: 'downloading', detail: '正在准备模型', progress: .1 } : ++polls === 1 ? { status: 'downloading', detail: '下载中', progress: .5 } : ready;
+    route = (url) => url === '/api/model/download?mode=accurate' ? { status: 'downloading', detail: '正在准备模型', progress: .1 } : ++polls === 1 ? { status: 'downloading', detail: '下载中', progress: .5 } : ready;
     render(<App pollInterval={30} />);
     await user.type(await screen.findByLabelText('抖音分享链接'), 'https://v.douyin.com/abc/');
     expect(screen.getByRole('button', { name: '开始提取' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: '下载模型' }));
     expect(await screen.findByRole('progressbar')).toBeVisible();
     await waitFor(() => expect(screen.getByRole('button', { name: '开始提取' })).toBeEnabled());
-    expect(new Headers(requests.find(r => r.url === '/api/model/download')?.init?.headers).get('X-Session-Token')).toBe('secret-token');
+    expect(new Headers(requests.find(r => r.url === '/api/model/download?mode=accurate')?.init?.headers).get('X-Session-Token')).toBe('secret-token');
   });
 
   it('imports a file, displays its name, and cancels the active task', async () => {
@@ -177,7 +177,8 @@ describe('本地文案工作台', () => {
 
   it('clearly marks a disconnected startup and reconnects to the local service', async () => {
     const user = userEvent.setup();
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(new Response(JSON.stringify(session))));
+    let disconnected = true;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => { if (url === '/api/session' && disconnected) { disconnected = false; throw new TypeError('Failed to fetch'); } return new Response(JSON.stringify(url === '/api/session' ? session : {items:[]})); }));
     render(<App />);
     expect(await screen.findByRole('alert')).toHaveTextContent('无法连接本地服务');
     expect(screen.getByText('无法连接')).toBeVisible();
@@ -248,7 +249,7 @@ describe('本地文案工作台', () => {
     await user.click(screen.getByRole('button', { name: /^重新连接$/ }));
     await user.click(await screen.findByRole('button', { name: '下载模型' }));
     expect(editor).toHaveValue('保留我的校对稿');
-    const post = requests.find(r => r.url === '/api/model/download')!;
+    const post = requests.find(r => r.url === '/api/model/download?mode=accurate')!;
     expect(new Headers(post.init?.headers).get('X-Session-Token')).toBe('refreshed-model-token');
   });
 
@@ -287,7 +288,7 @@ describe('本地文案工作台', () => {
     await user.click(screen.getByRole('button', { name: '重新连接本地服务' }));
     await waitFor(() => expect(requests.filter(r => r.url === '/api/session')).toHaveLength(2));
     await user.click(screen.getByRole('button', { name: '下载模型' }));
-    const posts = requests.filter(r => r.url === '/api/model/download');
+    const posts = requests.filter(r => r.url === '/api/model/download?mode=accurate');
     expect(new Headers(posts.at(-1)?.init?.headers).get('X-Session-Token')).toBe('fresh-token');
   });
   it('blocks session reconnect while a retry submission is pending and releases busy after completion', async () => {
