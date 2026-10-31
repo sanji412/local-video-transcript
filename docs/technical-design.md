@@ -2,6 +2,8 @@
 
 日期：2026-10-21
 
+本文记录 MVP 0.1 的初始方案；本地历史与精确模式见 [0.2 设计](superpowers/specs/2026-10-31-history-accuracy-design.md)。
+
 依据：[MVP 产品设计](superpowers/specs/2026-10-21-video-transcript-mvp-design.md)。技术路线已确认，本文说明首版的总体实现方向，不展开接口字段和代码细节。
 
 ## 1. 总体方案
