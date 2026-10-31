@@ -6,6 +6,7 @@ import os
 import selectors
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from .config import Settings
+from .history import HistoryStore
 
 
 def inspect_model(path: Path) -> dict:
@@ -64,6 +66,8 @@ class JobManager:
         self._process = None
         self._thread = None
         self._model = None
+        self._model_mode = "fast"
+        self.history = HistoryStore(settings.data_dir / "history.sqlite3")
         self._closed = False
         self._cancelled = set()
         self._command_builder = command_builder or (
@@ -86,11 +90,11 @@ class JobManager:
             raise KeyError(task_id)
         return self.settings.tasks_dir / f"task-{task_id}"
 
-    def model_state(self) -> dict:
+    def model_state(self, mode="fast") -> dict:
         with self._lock:
-            if self._model is not None:
+            if self._model is not None and self._model_mode == mode:
                 return dict(self._model)
-        return inspect_model(self.settings.model_dir)
+        return inspect_model(self.settings.model_path(mode))
 
     def current_task(self):
         with self._lock:
@@ -117,13 +121,16 @@ class JobManager:
         if (self._task and self._task["status"] == "running") or self._process is not None:
             raise BusyError("已有任务正在处理，请等待完成或取消当前任务。")
 
-    def reserve_task(self) -> dict:
+    def reserve_task(self, mode="fast", source_type=None, source_ref=None) -> dict:
         with self._lock:
             self._ensure_available()
+            self.settings.model_path(mode)
+            self._source_info = (source_type, source_ref)
             task_id = uuid.uuid4().hex
             self.task_dir(task_id).mkdir()
             self._task = {
                 "id": task_id,
+                "mode": mode,
                 "status": "running",
                 "stage": "preparing",
                 "detail": "正在准备素材",
@@ -137,31 +144,42 @@ class JobManager:
         with self._lock:
             if not self.is_running(task_id):
                 raise ValueError("任务已取消，请重新提交。")
+            if not self._source_info[0]:
+                self._source_info = (source, Path(input_value).name if source == "file" else input_value)
+            mode = self._task.get("mode", "fast")
             self._spawn(
                 {
                     "kind": "task",
+                    "mode": mode,
                     "source": source,
                     "input": input_value,
                     "work_dir": str(self.task_dir(task_id)),
-                    "model_dir": str(self.settings.model_dir),
+                    "model_dir": str(self.settings.model_path(mode)),
                     "max_bytes": self.settings.max_upload_bytes,
                     "max_duration": self.settings.max_duration,
                 },
                 task_id,
             )
 
-    def start_model_download(self) -> dict:
+    def start_model_download(self, mode="fast") -> dict:
         with self._lock:
             self._ensure_available()
-            if inspect_model(self.settings.model_dir)["status"] == "ready":
+            if inspect_model(self.settings.model_path(mode))["status"] == "ready":
                 self._model = None
-                return self.model_state()
+                return self.model_state(mode)
             work = self.settings.tasks_dir / f"model-{uuid.uuid4().hex}"
             work.mkdir()
+            self._model_mode = mode
             self._model = {"status": "downloading", "detail": "正在准备模型下载", "progress": None}
             try:
                 self._spawn(
-                    {"kind": "model", "work_dir": str(work), "model_dir": str(self.settings.model_dir)}, None
+                    {
+                        "kind": "model",
+                        "mode": mode,
+                        "work_dir": str(work),
+                        "model_dir": str(self.settings.model_path(mode)),
+                    },
+                    None,
                 )
             except Exception:
                 self._remove_directory(work)
@@ -197,6 +215,8 @@ class JobManager:
         result = None
         error = None
         timeout = self.settings.task_timeout if task_id else self.settings.model_timeout
+        if task_id and payload.get("mode") == "accurate":
+            timeout = self.settings.accurate_task_timeout
         deadline = time.monotonic() + timeout
         buffer = b""
         try:
@@ -269,9 +289,30 @@ class JobManager:
                             error=error or "没有获得有效文案，请检查视频是否包含清晰语音。",
                         )
                     else:
-                        self._task.update(
-                            status="completed", stage="completed", detail="文案提取完成", **result
-                        )
+                        try:
+                            record = self.history.create(
+                                id=task_id,
+                                source_type=self._source_info[0],
+                                source_ref=self._source_info[1],
+                                text=result["text"],
+                                source=result["source"],
+                                mode=self._task["mode"],
+                            )
+                        except (OSError, sqlite3.Error, ValueError):
+                            self._task.update(
+                                status="failed",
+                                stage="failed",
+                                detail="保存失败",
+                                error="文案保存失败，请检查磁盘空间和权限后重试。",
+                            )
+                        else:
+                            self._task.update(
+                                status="completed",
+                                stage="completed",
+                                detail="文案提取完成",
+                                history_id=record["id"],
+                                **result,
+                            )
                 elif error:
                     self._model = {"status": "error", "detail": error, "progress": None}
                 else:
@@ -305,6 +346,12 @@ class JobManager:
             if self._task and self._task["id"] == task_id:
                 self._task.update(cancelled_task)
             return cancelled_task
+
+    def delete_history(self, record_id):
+        with self._lock:
+            self.history.delete(record_id)
+            if self._task and self._task.get("history_id") == record_id:
+                self._task = None
 
     def close(self):
         with self._lock:

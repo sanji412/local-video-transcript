@@ -66,3 +66,31 @@ def test_retry_cleans_staging_left_by_interrupted_model_worker(tmp_path, monkeyp
     models.prepare_model(tmp_path / "model", lambda e: None)
     assert not stale.exists()
     assert unrelated.is_dir()
+
+
+def test_accurate_profile_has_distinct_pinned_marker_and_weights(tmp_path, monkeypatch):
+    target = tmp_path / "whisper-accurate"
+    calls = []
+
+    def download(path, emit, mode="fast"):
+        calls.append(mode)
+        fixture_model(path)
+
+    monkeypatch.setattr(models, "_download_model", download)
+    monkeypatch.setattr(models, "_validate_model", lambda path: None)
+    models.prepare_model(target, lambda e: None, mode="accurate")
+    assert calls == ["accurate"]
+    assert models.model_status(target)["status"] == "ready"
+    assert models.model_status(target, mode="fast")["status"] == "error"
+    import json
+
+    marker = json.loads((target / models.MARKER).read_text())
+    assert marker["repo"] == "mlx-community/whisper-large-v3-mlx"
+    assert marker["revision"] == "49e6aa286ad60c14352c404340ded53710378a11"
+
+
+def test_missing_accurate_model_describes_accurate_download_size(tmp_path):
+    state = models.model_status(tmp_path / "whisper-accurate")
+    assert state["status"] == "missing"
+    assert "3.1" in state["detail"]
+    assert "1.6" in models.model_status(tmp_path / "whisper")["detail"]

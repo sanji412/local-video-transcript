@@ -2,22 +2,42 @@
 
 import secrets
 import shutil
+import sqlite3
 from contextlib import asynccontextmanager
+from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings
+from .history import HistoryConflict
 from .manager import BusyError, JobManager
+
+Mode = Literal["fast", "accurate"]
 
 
 class LinkInput(BaseModel):
+    mode: Mode = "fast"
     share_text: str = Field(min_length=1, max_length=10000)
+
+
+class HistoryPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0, strict=True)
+    edited_text: str | None = Field(default=None, max_length=200000)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("edited_text", "title", mode="before")
+    @classmethod
+    def reject_null(cls, value):
+        if value is None:
+            raise ValueError("保存字段不能为 null")
+        return value
 
 
 class BodyLimitExceeded(HTTPException):
@@ -72,6 +92,8 @@ class LocalAccessMiddleware:
         except ValueError:
             return await JSONResponse({"detail": "请求大小无效。"}, status_code=400)(scope, receive, send)
         limit = self.max_bytes + 1024 * 1024 if scope["path"] == "/api/tasks/file" else 32 * 1024
+        if scope["path"].startswith("/api/history/") and scope["method"] == "PATCH":
+            limit = 2500000  # bounded JSON, including escaped Unicode for 200000 characters
         if content_length > limit or content_length < 0:
             return await JSONResponse({"detail": "文件或输入内容过大，请使用较小的视频。"}, status_code=413)(
                 scope, receive, send
@@ -144,8 +166,8 @@ def create_app(settings=None, manager=None):
     def dependencies():
         return {"ffmpeg": bool(shutil.which("ffmpeg")), "ffprobe": bool(shutil.which("ffprobe"))}
 
-    def ensure_ready(m):
-        if m.model_state()["status"] != "ready":
+    def ensure_ready(m, mode="fast"):
+        if m.model_state(mode)["status"] != "ready":
             raise HTTPException(409, "请先完成本地模型准备，再提取文案。")
         if not all(dependencies().values()):
             raise HTTPException(409, "未找到 FFmpeg，请安装 FFmpeg 后重新启动工具。")
@@ -156,17 +178,18 @@ def create_app(settings=None, manager=None):
         return {
             "token": token,
             "model": m.model_state(),
+            "models": {mode: m.model_state(mode) for mode in ("fast", "accurate")},
             "dependencies": dependencies(),
             "active_task": m.current_task(),
         }
 
     @app.get("/api/model")
-    def model_state(request: Request):
-        return get_manager(request).model_state()
+    def model_state(request: Request, mode: Mode = "fast"):
+        return get_manager(request).model_state(mode)
 
     @app.post("/api/model/download", status_code=202)
-    def prepare_model(request: Request):
-        return get_manager(request).start_model_download()
+    def prepare_model(request: Request, mode: Mode = "fast"):
+        return get_manager(request).start_model_download(mode)
 
     @app.post("/api/tasks/link", status_code=202)
     def link_task(body: LinkInput, request: Request):
@@ -177,8 +200,8 @@ def create_app(settings=None, manager=None):
             url = extract_link(body.share_text)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        ensure_ready(m)
-        task = m.reserve_task()
+        ensure_ready(m, body.mode)
+        task = m.reserve_task(body.mode, "link", url)
         try:
             m.start_reserved(task["id"], "link", url)
         except Exception:
@@ -187,13 +210,14 @@ def create_app(settings=None, manager=None):
         return m.get_task(task["id"])
 
     @app.post("/api/tasks/file", status_code=202)
-    async def file_task(request: Request, file: UploadFile):
+    async def file_task(request: Request, file: UploadFile, mode: Mode = Form("fast")):
         m = get_manager(request)
         try:
             if not file.filename or not file.filename.lower().endswith(".mp4"):
                 raise HTTPException(422, "请选择 MP4 视频文件。")
-            ensure_ready(m)
-            task = m.reserve_task()
+            ensure_ready(m, mode)
+            filename = file.filename.replace("\\", "/").rsplit("/", 1)[-1]
+            task = m.reserve_task(mode, "file", filename)
             path = m.task_dir(task["id"]) / "input.mp4"
             size = 0
             try:
@@ -232,6 +256,38 @@ def create_app(settings=None, manager=None):
             return get_manager(request).cancel(task_id)
         except KeyError:
             raise HTTPException(404, "任务不存在，请刷新页面。") from None
+
+    @app.exception_handler(sqlite3.Error)
+    async def database_error(request, exc):
+        return JSONResponse({"detail": "文稿读取或保存失败，请检查磁盘空间和权限后重试。"}, status_code=503)
+
+    @app.get("/api/history")
+    def history_list(request: Request, q: str = ""):
+        return {"items": get_manager(request).history.list(q)}
+
+    @app.get("/api/history/{record_id}")
+    def history_get(record_id: str, request: Request):
+        try:
+            return get_manager(request).history.get(record_id)
+        except KeyError:
+            raise HTTPException(404, "文稿不存在或已删除。") from None
+
+    @app.patch("/api/history/{record_id}")
+    def history_patch(record_id: str, body: HistoryPatch, request: Request):
+        try:
+            return get_manager(request).history.update(record_id, **body.model_dump(exclude_unset=True))
+        except HistoryConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except KeyError:
+            raise HTTPException(404, "文稿不存在或已删除。") from None
+
+    @app.delete("/api/history/{record_id}", status_code=204)
+    def history_delete(record_id: str, request: Request):
+        try:
+            get_manager(request).delete_history(record_id)
+        except KeyError:
+            raise HTTPException(404, "文稿不存在或已删除。") from None
+        return Response(status_code=204)
 
     if settings.frontend_dir.is_dir():
         app.mount("/", StaticFiles(directory=settings.frontend_dir, html=True), name="frontend")

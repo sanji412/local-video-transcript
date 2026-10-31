@@ -8,6 +8,8 @@ from pathlib import Path
 
 MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
 MODEL_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+ACCURATE_MODEL_REPO = "mlx-community/whisper-large-v3-mlx"
+ACCURATE_MODEL_REVISION = "49e6aa286ad60c14352c404340ded53710378a11"
 MARKER = ".ready.json"
 WEIGHTS = ("model.safetensors", "weights.safetensors", "weights.npz")
 
@@ -28,17 +30,29 @@ def _manifest(path: Path) -> dict:
     }
 
 
-def model_status(path: Path) -> dict:
+def model_profile(path: Path, mode=None):
+    mode = mode or ("accurate" if Path(path).name == "whisper-accurate" else "fast")
+    if mode == "accurate":
+        return ACCURATE_MODEL_REPO, ACCURATE_MODEL_REVISION
+    if mode != "fast":
+        raise ModelError("无效的识别模式")
+    return MODEL_REPO, MODEL_REVISION
+
+
+def model_status(path: Path, mode=None) -> dict:
     path = Path(path)
+    repo, revision = model_profile(path, mode)
     if not (path / MARKER).is_file():
-        return {"status": "missing", "detail": "首次使用需下载本地识别模型（约 1.6 GB）", "progress": None}
+        return {
+            "status": "missing",
+            "detail": "首次使用需下载精确识别模型（约 3.1 GB）"
+            if repo == ACCURATE_MODEL_REPO
+            else "首次使用需下载本地识别模型（约 1.6 GB）",
+            "progress": None,
+        }
     try:
         marker = json.loads((path / MARKER).read_text())
-        if (
-            not isinstance(marker, dict)
-            or marker.get("repo") != MODEL_REPO
-            or marker.get("revision") != MODEL_REVISION
-        ):
+        if not isinstance(marker, dict) or marker.get("repo") != repo or marker.get("revision") != revision:
             raise ValueError("different model")
         if marker.get("files") != _manifest(path):
             raise ValueError("changed model files")
@@ -47,7 +61,8 @@ def model_status(path: Path) -> dict:
     return {"status": "ready", "detail": "本地模型已就绪，可离线转写", "progress": 1.0}
 
 
-def _download_model(path: Path, emit) -> None:
+def _download_model(path: Path, emit, mode="fast") -> None:
+    repo, revision = model_profile(path, mode)
     from huggingface_hub import snapshot_download
     from tqdm.auto import tqdm
 
@@ -66,10 +81,10 @@ def _download_model(path: Path, emit) -> None:
             return result
 
     snapshot_download(
-        repo_id=MODEL_REPO,
-        revision=MODEL_REVISION,
+        repo_id=repo,
+        revision=revision,
         local_dir=str(path),
-        allow_patterns=["config.json", "weights.safetensors"],
+        allow_patterns=["config.json", "weights.npz" if mode == "accurate" else "weights.safetensors"],
         max_workers=2,
         tqdm_class=DownloadProgress,
     )
@@ -88,10 +103,11 @@ def _validate_model(path: Path) -> None:
     mx.clear_cache()
 
 
-def prepare_model(path: Path, emit) -> None:
+def prepare_model(path: Path, emit, mode="fast") -> None:
+    repo, revision = model_profile(path, mode)
     path = Path(path).resolve()
-    if model_status(path)["status"] == "ready":
-        emit({"type": "model", **model_status(path)})
+    if model_status(path, mode)["status"] == "ready":
+        emit({"type": "model", **model_status(path, mode)})
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     # The API allows only one model worker. Recover abandoned downloads after a
@@ -104,12 +120,17 @@ def prepare_model(path: Path, emit) -> None:
         {
             "type": "model",
             "status": "downloading",
-            "detail": "正在下载本地识别模型（约 1.6 GB）",
+            "detail": "正在下载精确识别模型（约 3.1 GB）"
+            if mode == "accurate"
+            else "正在下载本地识别模型（约 1.6 GB）",
             "progress": 0.0,
         }
     )
     try:
-        _download_model(staging, emit)
+        if mode == "fast":
+            _download_model(staging, emit)
+        else:
+            _download_model(staging, emit, mode=mode)
         _manifest(staging)
         emit(
             {
@@ -120,7 +141,7 @@ def prepare_model(path: Path, emit) -> None:
             }
         )
         _validate_model(staging)
-        marker = {"repo": MODEL_REPO, "revision": MODEL_REVISION, "files": _manifest(staging)}
+        marker = {"repo": repo, "revision": revision, "files": _manifest(staging)}
         (staging / MARKER).write_text(json.dumps(marker))
         # Only tool-owned model storage is replaced. No task/user media enters this path.
         if path.exists():
@@ -138,4 +159,4 @@ def prepare_model(path: Path, emit) -> None:
         raise ModelError("模型下载或加载验证失败，请检查网络、磁盘空间后重试") from error
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    emit({"type": "model", **model_status(path)})
+    emit({"type": "model", **model_status(path, mode)})

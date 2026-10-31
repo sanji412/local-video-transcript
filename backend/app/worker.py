@@ -46,7 +46,10 @@ def main(args=None, protocol=None) -> int:
             payload = json.loads(Path(args[0]).read_text())
             _watch_parent(payload.get("parent_pid"))
             if payload.get("kind") == "model":
-                prepare_model(Path(payload["model_dir"]), emit)
+                if payload.get("mode", "fast") == "fast":
+                    prepare_model(Path(payload["model_dir"]), emit)
+                else:
+                    prepare_model(Path(payload["model_dir"]), emit, mode=payload["mode"])
             elif payload.get("kind") == "task":
                 emit({"type": "result", **run_pipeline(payload, emit)})
             else:

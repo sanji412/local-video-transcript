@@ -38,3 +38,14 @@ def test_model_worker_emits_model_events(tmp_path, monkeypatch, capsys):
     )
     assert worker.main([str(payload)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "ready"
+
+
+def test_accurate_model_worker_passes_profile(tmp_path, monkeypatch):
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps({"kind": "model", "mode": "accurate", "model_dir": str(tmp_path / "whisper-accurate")})
+    )
+    modes = []
+    monkeypatch.setattr(worker, "prepare_model", lambda path, emit, mode="fast": modes.append(mode))
+    assert worker.main([str(payload)]) == 0
+    assert modes == ["accurate"]

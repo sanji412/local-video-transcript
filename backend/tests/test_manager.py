@@ -168,3 +168,62 @@ def test_cancel_finishing_does_not_cancel_newly_reserved_task(runner):
         release.set()
         cancellation.join(4)
     assert runner.get_task(new["id"])["status"] == "running"
+
+
+def test_completion_is_durable_before_publishing_and_records_profile(runner):
+    task = runner.reserve_task("accurate", "file", "口播.mp4")
+    runner.start_reserved(task["id"], "file", "ok")
+    result = wait_for(runner, task["id"], "completed")
+    record = runner.history.get(result["history_id"])
+    assert record["original_text"] == result["text"] == record["edited_text"]
+    assert record["mode"] == "accurate"
+    assert record["source_ref"] == "口播.mp4"
+
+
+def test_history_write_failure_never_publishes_completion(runner, monkeypatch):
+    def fail(**kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner.history, "create", fail)
+    task = runner.reserve_task()
+    runner.start_reserved(task["id"], "file", "ok")
+    result = wait_for(runner, task["id"], "failed")
+    assert "保存" in result["error"]
+    assert runner.history.list() == []
+    assert not runner.task_dir(task["id"]).exists()
+
+
+def test_accurate_payload_uses_separate_directory_and_mode(runner, monkeypatch):
+    payloads = []
+    monkeypatch.setattr(runner, "_spawn", lambda payload, task_id: payloads.append(payload))
+    task = runner.reserve_task("accurate")
+    runner.start_reserved(task["id"], "link", "https://v.douyin.com/abc/")
+    assert payloads[0]["mode"] == "accurate"
+    assert payloads[0]["model_dir"].endswith("/models/whisper-accurate")
+
+
+def test_deleting_current_completed_history_clears_stale_task(runner):
+    task = runner.reserve_task()
+    runner.start_reserved(task["id"], "file", "ok")
+    completed = wait_for(runner, task["id"], "completed")
+    runner.delete_history(completed["history_id"])
+    assert runner.current_task() is None
+    assert runner.history.list() == []
+
+
+def test_either_model_download_excludes_task_and_other_model(runner, monkeypatch):
+    monkeypatch.setattr(
+        "app.manager.inspect_model", lambda path: {"status": "missing", "detail": "缺失", "progress": None}
+    )
+    monkeypatch.setattr(runner, "_spawn", lambda *args: setattr(runner, "_process", object()))
+    try:
+        state = runner.start_model_download("accurate")
+        assert state["status"] == "downloading"
+        assert runner.model_state("accurate")["status"] == "downloading"
+        assert runner.model_state("fast")["status"] == "missing"
+        with pytest.raises(BusyError):
+            runner.reserve_task()
+        with pytest.raises(BusyError):
+            runner.start_model_download("fast")
+    finally:
+        runner._process = None

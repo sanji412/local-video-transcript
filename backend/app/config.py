@@ -20,6 +20,7 @@ class Settings:
     max_upload_bytes: int = MAX_MEDIA_BYTES
     max_duration: int = MAX_DURATION_SECONDS
     task_timeout: float = 900
+    accurate_task_timeout: float = 7200
     model_timeout: float = 7200
 
     @property
@@ -29,3 +30,12 @@ class Settings:
     @property
     def model_dir(self) -> Path:
         return self.data_dir / "models" / "whisper"
+
+    @property
+    def accurate_model_dir(self) -> Path:
+        return self.data_dir / "models" / "whisper-accurate"
+
+    def model_path(self, mode="fast") -> Path:
+        if mode not in ("fast", "accurate"):
+            raise ValueError("无效的识别模式")
+        return self.accurate_model_dir if mode == "accurate" else self.model_dir

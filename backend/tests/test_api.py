@@ -136,3 +136,102 @@ def test_streaming_body_without_content_length_is_bounded(client, content_type, 
     response = c.post(endpoint, headers=headers, content=iter([body]))
     assert response.status_code == 413
     assert "过大" in response.json()["detail"]
+
+
+def test_history_crud_revision_and_original_protection(client):
+    c, manager = client
+    manager.history.create(
+        id="saved",
+        source_type="file",
+        source_ref="a.mp4",
+        text="原始",
+        source="transcription",
+        mode="accurate",
+    )
+    assert c.get("/api/history").json()["items"][0]["id"] == "saved"
+    assert c.get("/api/history?q=不存在").json() == {"items": []}
+    assert c.get("/api/history/saved").json()["original_text"] == "原始"
+    assert c.patch("/api/history/saved", json={"revision": 0, "edited_text": "修改"}).status_code == 403
+    changed = c.patch(
+        "/api/history/saved", headers=auth(c), json={"revision": 0, "edited_text": "修改", "title": "标题"}
+    )
+    assert changed.status_code == 200
+    assert changed.json()["revision"] == 1
+    assert changed.json()["original_text"] == "原始"
+    assert (
+        c.patch(
+            "/api/history/saved", headers=auth(c), json={"revision": 0, "edited_text": "旧稿"}
+        ).status_code
+        == 409
+    )
+    for body in [
+        {"edited_text": "无修订号"},
+        {"revision": 1, "original_text": "篡改"},
+        {"revision": 1, "title": "x" * 201},
+        {"revision": 1, "edited_text": None},
+        {"revision": "1", "title": "坏"},
+    ]:
+        assert c.patch("/api/history/saved", headers=auth(c), json=body).status_code == 422
+    assert c.delete("/api/history/saved", headers=auth(c)).status_code == 204
+    assert c.get("/api/history/saved").status_code == 404
+
+
+def test_history_accepts_large_chinese_draft_without_relaxing_link_limit(client):
+    c, manager = client
+    manager.history.create(
+        id="saved", source_type="file", source_ref="a.mp4", text="原文", source="subtitle", mode="fast"
+    )
+    text = "中文测试" * 50000
+    result = c.patch("/api/history/saved", headers=auth(c), json={"revision": 0, "edited_text": text})
+    assert result.status_code == 200
+    assert result.json()["edited_text"] == text
+    assert (
+        c.patch(
+            "/api/history/saved", headers=auth(c), json={"revision": 1, "edited_text": text + "多"}
+        ).status_code
+        == 422
+    )
+
+
+def test_mode_api_defaults_and_validation(client):
+    c, manager = client
+    session = c.get("/api/session").json()
+    assert set(session["models"]) == {"fast", "accurate"}
+    assert c.get("/api/model?mode=accurate").status_code == 200
+    assert c.get("/api/model?mode=wrong").status_code == 422
+    response = c.post(
+        "/api/tasks/link",
+        headers=auth(c),
+        json={"share_text": "https://v.douyin.com/abc/", "mode": "accurate"},
+    )
+    assert response.status_code == 202
+    assert response.json()["mode"] == "accurate"
+    c.post(f"/api/tasks/{response.json()['id']}/cancel", headers=auth(c))
+    response = c.post(
+        "/api/tasks/file",
+        headers=auth(c),
+        data={"mode": "accurate"},
+        files={"file": ("../../口播.mp4", b"video")},
+    )
+    assert response.json()["mode"] == "accurate"
+    assert manager._source_info == ("file", "口播.mp4")
+
+
+def test_history_remains_available_without_model_and_storage_errors_are_actionable(client, monkeypatch):
+    import sqlite3
+
+    c, manager = client
+    monkeypatch.setattr(
+        "app.manager.inspect_model",
+        lambda path: {"status": "missing", "detail": "模型未准备", "progress": None},
+    )
+    assert c.get("/api/history").json() == {"items": []}
+
+    def fail(q):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(manager.history, "list", fail)
+    response = c.get("/api/history")
+    assert response.status_code == 503
+    assert "磁盘" in response.json()["detail"]
+    assert "disk I/O" not in response.text
