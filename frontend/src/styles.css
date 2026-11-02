@@ -143,3 +143,8 @@ progress { display: block; width: 100%; height: 5px; accent-color: var(--blue); 
 .editor-surface[hidden] { display: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid #315edb; outline-offset: 3px; }
 @media (max-width: 620px) { .record-header { padding: 15px; flex-wrap: wrap; } .record-form { padding: 15px; flex-wrap: wrap; } .manuscript-versions {padding: 10px 15px;} .original-surface {padding: 15px;} .history-list {max-height: 230px;} }
+.segment-editor { padding: 20px; }
+.segment-editor audio { width: 100%; margin-bottom: 10px; }
+.segment-row { border-top: 1px solid var(--border, #dedbd4); padding: 16px 0; }
+.segment-row > div:first-child { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.segment-row textarea { width: 100%; min-height: 90px; resize: vertical; font: inherit; line-height: 1.8; padding: 12px; border: 1px solid #dedbd4; border-radius: 8px; background: transparent; color: inherit; }

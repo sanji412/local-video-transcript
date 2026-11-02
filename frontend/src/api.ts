@@ -1,9 +1,10 @@
 export type ModelStatus = { status: 'missing' | 'downloading' | 'ready' | 'error'; detail: string; progress: number | null };
 export type RecognitionMode = 'fast' | 'accurate';
 export type HistorySummary = { id: string; title: string; source_type: 'link' | 'file'; source_ref: string; created_at: string; updated_at: string; source: 'subtitle' | 'transcription'; mode: RecognitionMode; revision: number; preview: string };
-export type HistoryRecord = HistorySummary & { original_text: string; edited_text: string };
+export type Segment = { id: number; start: number; end: number; original_text: string; text: string };
+export type HistoryRecord = HistorySummary & { original_text: string; edited_text: string; segments?: Segment[]; audio_available?: boolean; audio_retained?: boolean };
 export class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
-export type Task = { id: string; mode?: RecognitionMode; history_id?: string | null; status: 'running' | 'completed' | 'failed' | 'cancelled'; stage: string; detail: string; text: string; source: 'subtitle' | 'transcription' | null; error: string | null };
+export type Task = { id: string; kind?: 'task' | 'retry'; segment_id?: number; mode?: RecognitionMode; history_id?: string | null; status: 'running' | 'completed' | 'failed' | 'cancelled'; stage: string; detail: string; text: string; source: 'subtitle' | 'transcription' | null; error: string | null };
 export type Session = { token: string; model: ModelStatus; models?: Record<RecognitionMode, ModelStatus>; dependencies: { ffmpeg: boolean; ffprobe: boolean }; active_task: Task | null };
 
 export async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {

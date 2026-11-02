@@ -9,6 +9,7 @@ export function useManuscript(token: string | undefined, delay: number) {
   const [loading, setLoading] = useState(false);
   const current = useRef<HistoryRecord | null>(null);
   const latest = useRef('');
+  const edits = useRef(new Map<number,string>());
   const dirty = useRef(false);
   const queue = useRef<Promise<boolean> | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -20,7 +21,7 @@ export function useManuscript(token: string | undefined, delay: number) {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; clearTimeout(timer.current); ++generation.current; }; }, []);
 
   function setText(value: string) { latest.current = value; renderText(value); }
-  function reset() { setLoading(false); failedOpen.current = null; ++generation.current; clearTimeout(timer.current); current.current = null; renderRecord(null); dirty.current = false; conflict.current = false; setSaveState('saved'); }
+  function reset() { setLoading(false); failedOpen.current = null; ++generation.current; clearTimeout(timer.current); current.current = null; edits.current.clear(); renderRecord(null); dirty.current = false; conflict.current = false; setSaveState('saved'); }
   async function flush(): Promise<boolean> {
     clearTimeout(timer.current);
     if (queue.current) return queue.current;
@@ -34,10 +35,12 @@ export function useManuscript(token: string | undefined, delay: number) {
         while (current.current && dirty.current) {
           const base = current.current;
           const value = latest.current;
-          const next = await request<HistoryRecord>(`/history/${encodeURIComponent(base.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision: base.revision, edited_text: value }) }, tokenRef.current);
+          const segment = edits.current.entries().next().value as [number,string] | undefined;
+          const next = await request<HistoryRecord>(`/history/${encodeURIComponent(base.id)}${segment ? `/segments/${segment[0]}` : ''}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(segment ? {revision: base.revision,text:segment[1]} : { revision: base.revision, edited_text: value }) }, tokenRef.current);
           if (!mounted.current || current.current?.id !== base.id) return false;
+          if (segment && edits.current.get(segment[0]) === segment[1]) edits.current.delete(segment[0]);
           current.current = next; renderRecord(next);
-          dirty.current = latest.current !== next.edited_text;
+          dirty.current = segment ? edits.current.size > 0 : latest.current !== next.edited_text;
         }
         setSaveState('saved'); setSaveError(''); return true;
       } catch (error) {
@@ -59,6 +62,13 @@ export function useManuscript(token: string | undefined, delay: number) {
     clearTimeout(timer.current);
     if (!conflict.current) { setSaveState('saving'); timer.current = setTimeout(() => void flush(), delay); }
   }
+  function editSegment(id: number, value: string) {
+    const base = current.current;
+    if (!base?.segments) return;
+    edits.current.set(id,value);
+    edit(base.segments.map(s => edits.current.get(s.id) ?? s.text).join('\n'));
+  }
+  function segmentText(id: number) { return edits.current.get(id) ?? current.current?.segments?.find(s=>s.id===id)?.text ?? ''; }
   async function open(id: string, discard = false): Promise<boolean> {
     const epoch = ++generation.current;
     setLoading(true);
@@ -69,7 +79,7 @@ export function useManuscript(token: string | undefined, delay: number) {
       if (!mounted.current || epoch !== generation.current) return false;
       if (!discard && dirty.current) return false;
       if (current.current?.id === next.id && next.revision < current.current.revision) return false;
-      failedOpen.current = null; current.current = next; renderRecord(next); setText(next.edited_text); dirty.current = false; conflict.current = false; setSaveState('saved'); setSaveError('');
+      failedOpen.current = null; edits.current.clear(); current.current = next; renderRecord(next); setText(next.edited_text); dirty.current = false; conflict.current = false; setSaveState('saved'); setSaveError('');
       return true;
     } catch (error) { if (mounted.current && epoch === generation.current) { failedOpen.current = id; setSaveState('error'); setSaveError(error instanceof Error ? error.message : '无法打开文稿'); } return false; }
     finally { if (mounted.current && epoch === generation.current) setLoading(false); }
@@ -96,5 +106,5 @@ export function useManuscript(token: string | undefined, delay: number) {
     window.addEventListener('beforeunload', guard);
     return () => window.removeEventListener('beforeunload', guard);
   }, []);
-  return { text, setText, record, loading, dirty, edit, flush, retry: () => failedOpen.current ? open(failedOpen.current) : flush(), open, reset, rename, saveState, saveError };
+  return { currentRecord: () => current.current, editSegment, segmentText, text, setText, record, loading, dirty, edit, flush, retry: () => failedOpen.current ? open(failedOpen.current) : flush(), open, reset, rename, saveState, saveError };
 }

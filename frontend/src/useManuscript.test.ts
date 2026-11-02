@@ -29,3 +29,15 @@ it('rejects a stale same-record GET after a newer edit has finished saving',asyn
  await act(async()=>{finish(new Response(JSON.stringify(original)));await loading;});
  expect(result.current.text).toBe('新版本已保存');expect(result.current.record?.revision).toBe(2);expect(result.current.saveState).toBe('saved');
 });
+it('saves only changed segments with sequential revisions and keeps full edited text',async()=>{
+ const segments=[{id:0,start:0,end:1,original_text:'甲',text:'甲'},{id:1,start:1,end:2,original_text:'乙',text:'乙'}];
+ let record={id:'a',revision:1,edited_text:'甲\n乙',original_text:'甲\n乙',segments};
+ const calls:string[]=[];
+ vi.stubGlobal('fetch',vi.fn((path:string,init?:RequestInit)=>{
+  if(init?.method==='PATCH'){calls.push(path);const body=JSON.parse(init.body as string);expect(body.revision).toBe(record.revision);const id=Number(path.split('/').pop());record={...record,revision:record.revision+1,segments:record.segments.map(s=>s.id===id?{...s,text:body.text}:s)};record.edited_text=record.segments.map(s=>s.text).join('\n');}
+  return Promise.resolve(new Response(JSON.stringify(record)));
+ }));
+ const {result}=renderHook(()=>useManuscript('secret',700));await act(async()=>{await result.current.open('a');});
+ act(()=>result.current.editSegment(0,'修改'));await act(async()=>{await result.current.flush();});
+ expect(calls).toEqual(['/api/history/a/segments/0']);expect(result.current.text).toBe('修改\n乙');expect(result.current.record?.segments?.[1].text).toBe('乙');
+});

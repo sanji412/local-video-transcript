@@ -61,7 +61,7 @@ describe('本地文案工作台', () => {
     expect(click).toHaveBeenCalled();
     const post = requests.find(r => r.url === '/api/tasks/link')!;
     expect(new Headers(post.init?.headers).get('X-Session-Token')).toBe('secret-token');
-    expect(JSON.parse(post.init?.body as string)).toEqual({ share_text: '看看 https://v.douyin.com/abc/', mode: 'accurate' });
+    expect(JSON.parse(post.init?.body as string)).toEqual({ share_text: '看看 https://v.douyin.com/abc/', mode: 'accurate', retain_audio: false });
     click.mockRestore();
   });
 
