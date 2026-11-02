@@ -64,3 +64,11 @@ def test_retry_worker_returns_candidate_without_task_pipeline(tmp_path, monkeypa
     assert worker.main([str(payload)]) == 0
     assert calls[0]["start"] == 2.0
     assert json.loads(capsys.readouterr().out)["text"] == "候选文字"
+
+
+def test_worker_emits_duplicate_event_without_a_transcript_result(tmp_path, monkeypatch, capsys):
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps({"kind": "task"}))
+    monkeypatch.setattr(worker, "run_pipeline", lambda *a: {"duplicate_video_id": "123"})
+    assert worker.main([str(payload)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"type": "duplicate", "video_id": "123"}

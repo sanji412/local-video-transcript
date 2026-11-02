@@ -51,7 +51,11 @@ def main(args=None, protocol=None) -> int:
                 else:
                     prepare_model(Path(payload["model_dir"]), emit, mode=payload["mode"])
             elif payload.get("kind") == "task":
-                emit({"type": "result", **run_pipeline(payload, emit)})
+                result = run_pipeline(payload, emit)
+                if "duplicate_video_id" in result:
+                    emit({"type": "duplicate", "video_id": result["duplicate_video_id"]})
+                else:
+                    emit({"type": "result", **result})
             elif payload.get("kind") == "retry":
                 emit({"type": "result", **run_retry(payload, emit)})
             else:

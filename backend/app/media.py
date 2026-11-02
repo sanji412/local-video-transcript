@@ -582,9 +582,18 @@ def run_pipeline(payload: dict, emit) -> dict:
     if not work.is_dir():
         raise MediaError("任务目录不存在，请重新提交")
     info = {}
+    video_id = None
     if payload.get("source") == "link":
+        url = extract_link(payload["input"])
+        if "known_video_ids" in payload:
+            emit({"type": "stage", "stage": "checking", "detail": "正在检查视频是否已经提取"})
+            with safe_network():
+                url = _resolve_short_link(url)
+            video_id = re.search(r"/video/(\d+)", urllib.parse.urlsplit(url).path)[1]
+            if not payload.get("force") and video_id in payload["known_video_ids"]:
+                return {"duplicate_video_id": video_id}
         emit({"type": "stage", "stage": "downloading", "detail": "正在获取抖音视频"})
-        path, info = download_video(extract_link(payload["input"]), work)
+        path, info = download_video(url, work)
     elif payload.get("source") == "file":
         path = Path(payload["input"]).resolve()
         if not path.is_relative_to(work) or path == work or path.suffix.lower() != ".mp4":
@@ -596,10 +605,14 @@ def run_pipeline(payload: dict, emit) -> dict:
     subtitles = _subtitles(info, duration, work, timed=True)
     emit({"type": "stage", "stage": "converting", "detail": "正在提取音轨"})
     audio = extract_audio(path, work)
+    metadata = {"video_id": video_id, "media_duration_seconds": duration, "recognition_seconds": None}
     if subtitles:
-        return {**subtitles, "source": "subtitle"}
+        return {**subtitles, "source": "subtitle", **metadata}
     emit({"type": "stage", "stage": "transcribing", "detail": "正在本机识别完整音频，音视频不会上传"})
-    return {**transcribe_audio(audio, Path(payload["model_dir"]), timed=True), "source": "transcription"}
+    started = time.perf_counter()
+    result = transcribe_audio(audio, Path(payload["model_dir"]), timed=True)
+    metadata["recognition_seconds"] = max(0.0, time.perf_counter() - started)
+    return {**result, "source": "transcription", **metadata}
 
 
 def run_retry(payload: dict, emit) -> dict:
@@ -640,4 +653,11 @@ def run_retry(payload: dict, emit) -> dict:
     except (OSError, wave.Error, EOFError) as error:
         raise MediaError("回听音频无法读取，请重新导入原视频") from error
     emit({"type": "stage", "stage": "transcribing", "detail": "正在本机重新识别选中片段"})
-    return {"text": transcribe_audio(clip, Path(payload["model_dir"])), "source": "transcription"}
+    started = time.perf_counter()
+    text = transcribe_audio(clip, Path(payload["model_dir"]))
+    return {
+        "text": text,
+        "source": "transcription",
+        "recognition_seconds": max(0.0, time.perf_counter() - started),
+        "media_duration_seconds": (last - first) / rate,
+    }

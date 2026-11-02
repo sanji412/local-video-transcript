@@ -80,7 +80,8 @@ def test_retry_decodes_only_selected_wav_frames_without_modifying_source(tmp_pat
         },
         lambda e: None,
     )
-    assert result == {"text": "只识别中间一秒", "source": "transcription"}
+    assert result["text"] == "只识别中间一秒" and result["source"] == "transcription"
+    assert result["media_duration_seconds"] == 1.0 and result["recognition_seconds"] >= 0
     assert audio.read_bytes() == original
 
 

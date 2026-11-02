@@ -119,7 +119,9 @@ def test_local_pipeline_transcribes_when_subtitles_are_partial(tmp_path, monkeyp
         {"source": "file", "input": str(path), "work_dir": str(tmp_path), "model_dir": str(model)},
         lambda e: None,
     )
-    assert result == {**timed, "source": "transcription"}
+    assert result["text"] == timed["text"] and result["segments"] == timed["segments"]
+    assert result["source"] == "transcription" and result["media_duration_seconds"] == 30.0
+    assert result["recognition_seconds"] >= 0
 
 
 def test_silence_rejected_before_model_import(tmp_path):
@@ -239,9 +241,12 @@ def test_full_subtitles_skip_transcription_but_partial_subtitles_do_not(tmp_path
     }
     result = media.run_pipeline(payload, lambda e: None)
     assert result["source"] == "subtitle"
+    assert result["recognition_seconds"] is None and result["media_duration_seconds"] == 10.0
     assert result["segments"] == [{"id": 0, "start": 0.0, "end": 10.0, "text": "这是完整字幕"}]
     monkeypatch.setattr(media, "probe_media", lambda p: 100.0)
-    assert media.run_pipeline(payload, lambda e: None) == {"source": "transcription", **timed}
+    result = media.run_pipeline(payload, lambda e: None)
+    assert result["text"] == timed["text"] and result["source"] == "transcription"
+    assert result["recognition_seconds"] >= 0
 
 
 def test_timed_transcription_filters_text_and_timestamps_together():
@@ -363,3 +368,63 @@ def test_probe_accepts_full_thirty_minutes(tmp_path, monkeypatch):
 )
 def test_extract_share_title(share_text, expected):
     assert media.extract_share_title(share_text) == expected
+
+
+def test_known_video_is_skipped_before_download_or_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(media, "_resolve_short_link", lambda url: "https://www.douyin.com/video/123")
+    calls = []
+    monkeypatch.setattr(media, "download_video", lambda *args: calls.append(args))
+    result = media.run_pipeline(
+        {
+            "source": "link",
+            "input": "https://v.douyin.com/newCode/",
+            "work_dir": str(tmp_path),
+            "model_dir": "unused",
+            "known_video_ids": ["123"],
+        },
+        lambda e: None,
+    )
+    assert result == {"duplicate_video_id": "123"}
+    assert calls == []
+
+
+def test_forced_repeat_keeps_canonical_id_and_measures_only_recognition(tmp_path, monkeypatch):
+    clock = [100.0]
+    path = tmp_path / "input.mp4"
+    path.write_bytes(b"video")
+    monkeypatch.setattr(media.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(media, "_resolve_short_link", lambda url: "https://www.douyin.com/video/123")
+    downloaded = []
+
+    def download(url, work):
+        downloaded.append(url)
+        clock[0] += 20
+        return path, {}
+
+    def extract(path, work):
+        clock[0] += 5
+        return work / "audio.wav"
+
+    def recognize(*args, **kw):
+        clock[0] += 4.5
+        return {"text": "正文", "segments": [dict(id=0, start=0, end=10, text="正文")]}
+
+    monkeypatch.setattr(media, "download_video", download)
+    monkeypatch.setattr(media, "probe_media", lambda path: 10.0)
+    monkeypatch.setattr(media, "extract_audio", extract)
+    monkeypatch.setattr(media, "transcribe_audio", recognize)
+    result = media.run_pipeline(
+        {
+            "source": "link",
+            "input": "https://v.douyin.com/newCode/",
+            "work_dir": str(tmp_path),
+            "model_dir": "unused",
+            "known_video_ids": ["123"],
+            "force": True,
+        },
+        lambda e: None,
+    )
+    assert downloaded == ["https://www.douyin.com/video/123"]
+    assert result["video_id"] == "123"
+    assert result["recognition_seconds"] == 4.5
+    assert result["media_duration_seconds"] == 10.0
