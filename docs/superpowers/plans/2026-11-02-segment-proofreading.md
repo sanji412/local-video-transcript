@@ -16,8 +16,10 @@
 
 ## 任务分工及检查点
 
-- [ ] 媒体引擎（主代理）：先在 `backend/tests/test_media.py`、`test_media_integration.py`、`test_worker.py` 写失败用例；再在 `media.py`、`worker.py` 保存真实 segments，保持旧纯文本函数兼容，增加受限 WAV 局部裁剪与 retry 协议。定向测试、提交。
-- [ ] 后端数据/API（后端子代理）：先补 `test_history.py`、`test_manager.py`、`test_api.py`；修改 history/manager/main/config，按设计实现增量存储、音频生命周期、单段 PATCH、局部任务及取消。使用受控 worker 测试持久化和进程路径，定向测试、提交。
-- [ ] 前端（前端子代理）：先增加时间段界面和保存/候选交互测试；修改 api/App/useManuscript，新增 `SegmentEditor.tsx`（必要时配套 hook），沿用视觉样式，支持音频控件、段自动保存、候选明确采用、临时音频提示和清除。保留旧稿兼容及全稿复制导出，定向测试、构建、提交。
-- [ ] 独立复核：检查以上三个契约及未保存编辑/重连/取消/删除竞态；修复重要问题并回归测试、提交。
-- [ ] 全量验收：`./scripts/check.sh`、Ruff 格式、真实样本局部识别、浏览器桌面/窄屏，更新 README/验证文档。确认服务空闲后升级，保留旧历史；提交并交付。
+- [x] 媒体引擎（主代理）：先在 `backend/tests/test_media.py`、`test_media_integration.py`、`test_worker.py` 写失败用例；再在 `media.py`、`worker.py` 保存真实 segments，保持旧纯文本函数兼容，增加受限 WAV 局部裁剪与 retry 协议。定向测试、提交。
+- [x] 后端数据/API（后端子代理及主代理）：补充 history/manager/API 测试并实现增量存储、音频生命周期、单段 PATCH、局部任务及取消，使用受控 worker 验证持久化和失败回滚，定向测试、提交。
+- [x] 前端：增加时间段界面和保存/候选交互测试；修改 api/App/useManuscript，新增 `SegmentEditor.tsx`，沿用视觉样式，支持音频控件、段自动保存、候选明确采用、临时音频提示和清除。保留旧稿兼容及全稿复制导出，定向测试、构建、提交。
+- [x] 独立复核：修复候选跨文稿导航、局部失败重试路由、音频卸载和 StrictMode 问题；补充回归测试，最终复核通过。
+- [x] 全量验收：196 项测试、Ruff、类型和构建通过；真实离线识别、实际 HTTP 工作流、桌面/窄屏检查完成。已更新使用与验证文档，服务升级后确认原有 6 条完整文稿未变。全部记录随本计划提交。
+
+验收细节见 [分段校对验证记录](../../validation-v0.3.md)。功能仍在原工作分支，未推送或合并。

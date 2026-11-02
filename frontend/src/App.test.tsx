@@ -71,7 +71,9 @@ describe('本地文案工作台', () => {
     let polls = 0;
     route = (url) => url === '/api/model/download?mode=accurate' ? { status: 'downloading', detail: '正在准备模型', progress: .1 } : ++polls === 1 ? { status: 'downloading', detail: '下载中', progress: .5 } : ready;
     render(<App pollInterval={30} />);
+    await waitFor(() => expect(screen.getByLabelText('抖音分享链接')).toBeEnabled());
     await user.type(await screen.findByLabelText('抖音分享链接'), 'https://v.douyin.com/abc/');
+    expect(screen.getByLabelText('抖音分享链接')).toHaveValue('https://v.douyin.com/abc/');
     expect(screen.getByRole('button', { name: '开始提取' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: '下载模型' }));
     expect(await screen.findByRole('progressbar')).toBeVisible();
