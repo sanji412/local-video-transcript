@@ -56,8 +56,10 @@ class HistoryStore:
         segments=None,
         audio_retained=False,
     ):
-        segments = self.validate_segments(segments or [])
+        segments = self.validate_segments(segments if segments is not None else [])
         edited = "\n".join(item["text"] for item in segments) if segments else text
+        if not isinstance(text, str) or len(text) > 200000 or edited != text:
+            raise ValueError("文案与分段内容不一致或过长")
         now = datetime.now(UTC).isoformat()
         title = (title or (source_ref if source_type == "file" else "链接文案"))[:200]
         with self._connection() as db:
@@ -131,6 +133,8 @@ class HistoryStore:
             raise ValueError("无效分段")
         result, ids, previous = [], set(), -1
         for item in segments:
+            if not isinstance(item, dict) or not {"id", "start", "end", "text"}.issubset(item):
+                raise ValueError("无效分段")
             ident, start, end, text = item["id"], item["start"], item["end"], item["text"]
             if (
                 type(ident) is not int

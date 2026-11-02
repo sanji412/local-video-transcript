@@ -1,3 +1,4 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -97,3 +98,82 @@ def test_segment_edit_preserves_original_and_alignment(tmp_path):
     assert changed["segments"][0]["original_text"] == "甲"
     with pytest.raises(HistoryConflict):
         store.update("abc", revision=1, edited_text="错误")
+
+
+@pytest.mark.parametrize(
+    "segments", [{}, [None], [{"id": 0}], [{"id": 0, "start": 0, "end": 1, "text": "不同"}]]
+)
+def test_reject_inconsistent_or_malformed_segments_without_creating_record(tmp_path, segments):
+    store = HistoryStore(tmp_path / "history.sqlite3")
+    with pytest.raises(ValueError):
+        store.create(
+            id="bad",
+            source_type="file",
+            source_ref="a.mp4",
+            text="原文",
+            source="transcription",
+            mode="fast",
+            segments=segments,
+        )
+    assert store.list() == []
+
+
+def test_database_upgrade_keeps_legacy_draft_and_revision(tmp_path):
+    path = tmp_path / "history.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE history (id TEXT PRIMARY KEY, title TEXT, source_type TEXT, source_ref TEXT, "
+            "created_at TEXT, updated_at TEXT, original_text TEXT, edited_text TEXT, source TEXT, mode TEXT, revision INTEGER)"
+        )
+        db.execute(
+            "INSERT INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy",
+                "已命名",
+                "file",
+                "a.mp4",
+                "2026-10-31",
+                "2026-11-02",
+                "原文",
+                "已校对稿",
+                "transcription",
+                "accurate",
+                7,
+            ),
+        )
+    store = HistoryStore(path)
+    record = store.get("legacy")
+    assert record["edited_text"] == "已校对稿" and record["original_text"] == "原文"
+    assert record["revision"] == 7 and record["title"] == "已命名"
+    assert record["segments"] == [] and record["audio_available"] is False
+    assert store.update("legacy", revision=7, edited_text="继续编辑")["revision"] == 8
+
+
+def test_segment_compare_and_swap_preserves_whole_record_under_concurrent_edits(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite3")
+    before = store.create(
+        id="timed",
+        source_type="file",
+        source_ref="a.mp4",
+        text="甲\n乙",
+        source="transcription",
+        mode="fast",
+        segments=[
+            {"id": 0, "start": 0, "end": 1, "text": "甲"},
+            {"id": 1, "start": 1, "end": 2, "text": "乙"},
+        ],
+    )
+
+    def change(ident):
+        try:
+            return store.update_segment("timed", ident, revision=0, text="改")
+        except HistoryConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(change, [0, 1]))
+    assert sum(value is not None for value in results) == 1
+    after = store.get("timed")
+    assert after["revision"] == 1 and after["original_text"] == before["original_text"]
+    assert [s["original_text"] for s in after["segments"]] == ["甲", "乙"]
+    assert after["edited_text"] in ["改\n乙", "甲\n改"]
