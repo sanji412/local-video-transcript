@@ -113,12 +113,13 @@ def test_local_pipeline_transcribes_when_subtitles_are_partial(tmp_path, monkeyp
     model = tmp_path / "model"
     monkeypatch.setattr(media, "probe_media", lambda p: 30.0)
     monkeypatch.setattr(media, "extract_audio", lambda p, w: w / "audio.wav")
-    monkeypatch.setattr(media, "transcribe_audio", lambda p, m: "这是全文。")
+    timed = {"text": "这是全文。", "segments": [{"id": 0, "start": 0.0, "end": 3.0, "text": "这是全文。"}]}
+    monkeypatch.setattr(media, "transcribe_audio", lambda p, m, **kw: timed)
     result = media.run_pipeline(
         {"source": "file", "input": str(path), "work_dir": str(tmp_path), "model_dir": str(model)},
         lambda e: None,
     )
-    assert result == {"text": "这是全文。", "source": "transcription"}
+    assert result == {**timed, "source": "transcription"}
 
 
 def test_silence_rejected_before_model_import(tmp_path):
@@ -225,18 +226,58 @@ def test_full_subtitles_skip_transcription_but_partial_subtitles_do_not(tmp_path
     monkeypatch.setattr(media, "download_video", lambda *a: (path, info))
     monkeypatch.setattr(media, "probe_media", lambda p: 10.0)
     monkeypatch.setattr(media, "extract_audio", lambda p, w: w / "audio.wav")
-    monkeypatch.setattr(media, "transcribe_audio", lambda *a: "这是全段识别结果")
+    timed = {
+        "text": "这是全段识别结果",
+        "segments": [{"id": 0, "start": 0.0, "end": 10.0, "text": "这是全段识别结果"}],
+    }
+    monkeypatch.setattr(media, "transcribe_audio", lambda *a, **kw: timed)
     payload = {
         "source": "link",
         "input": "https://v.douyin.com/abc/",
         "work_dir": str(tmp_path),
         "model_dir": str(tmp_path / "model"),
     }
-    assert media.run_pipeline(payload, lambda e: None)["source"] == "subtitle"
+    result = media.run_pipeline(payload, lambda e: None)
+    assert result["source"] == "subtitle"
+    assert result["segments"] == [{"id": 0, "start": 0.0, "end": 10.0, "text": "这是完整字幕"}]
     monkeypatch.setattr(media, "probe_media", lambda p: 100.0)
-    assert media.run_pipeline(payload, lambda e: None) == {
-        "source": "transcription",
-        "text": "这是全段识别结果",
+    assert media.run_pipeline(payload, lambda e: None) == {"source": "transcription", **timed}
+
+
+def test_timed_transcription_filters_text_and_timestamps_together():
+    result = media.transcript_segments(
+        {
+            "segments": [
+                {"start": 0.2, "end": 2.3, "text": " 第一段。 "},
+                {"start": 2.3, "end": 4.0, "text": "幻听", "avg_logprob": -2},
+                {"start": 4.1, "end": 6.2, "text": "第二段。"},
+            ]
+        },
+        duration=6.0,
+    )
+    assert result == {
+        "text": "第一段。\n第二段。",
+        "segments": [
+            {"id": 0, "start": 0.2, "end": 2.3, "text": "第一段。"},
+            {"id": 1, "start": 4.1, "end": 6.0, "text": "第二段。"},
+        ],
+    }
+
+
+@pytest.mark.parametrize("start,end", [(float("nan"), 2), (0, float("inf")), (-1, 2), (3, 2)])
+def test_timed_transcription_rejects_invalid_times(start, end):
+    with pytest.raises(media.MediaError, match="时间"):
+        media.transcript_segments({"segments": [{"start": start, "end": end, "text": "正文"}]}, 5)
+
+
+def test_timed_subtitles_preserve_real_cue_boundaries():
+    content = "00:00.000 --> 00:05.000\n你好世界\n\n00:05.000 --> 00:10.000\n这是完整字幕"
+    assert media.subtitle_text(content, 10, timed=True) == {
+        "text": "你好世界\n这是完整字幕",
+        "segments": [
+            {"id": 0, "start": 0.0, "end": 5.0, "text": "你好世界"},
+            {"id": 1, "start": 5.0, "end": 10.0, "text": "这是完整字幕"},
+        ],
     }
 
 

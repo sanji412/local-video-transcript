@@ -49,3 +49,18 @@ def test_accurate_model_worker_passes_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "prepare_model", lambda path, emit, mode="fast": modes.append(mode))
     assert worker.main([str(payload)]) == 0
     assert modes == ["accurate"]
+
+
+def test_retry_worker_returns_candidate_without_task_pipeline(tmp_path, monkeypatch, capsys):
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps({"kind": "retry", "start": 2.0, "end": 4.0}))
+    calls = []
+
+    def retry(data, emit):
+        calls.append(data)
+        return {"text": "候选文字", "source": "transcription"}
+
+    monkeypatch.setattr(worker, "run_retry", retry, raising=False)
+    assert worker.main([str(payload)]) == 0
+    assert calls[0]["start"] == 2.0
+    assert json.loads(capsys.readouterr().out)["text"] == "候选文字"

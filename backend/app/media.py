@@ -413,7 +413,7 @@ def _timestamp(text: str) -> float:
     return sum(float(value) * 60**index for index, value in enumerate(reversed(components)))
 
 
-def subtitle_text(content: str, duration: float) -> str | None:
+def subtitle_text(content: str, duration: float, *, timed=False) -> str | dict | None:
     """Accept only timed Chinese captions with near-continuous full coverage."""
     if not 0 < duration <= MAX_DURATION or len(content.encode("utf-8")) > MAX_SUBTITLE_BYTES:
         return None
@@ -446,10 +446,18 @@ def subtitle_text(content: str, duration: float) -> str | None:
     chinese = re.findall(r"[\u3400-\u9fff]", text)
     if covered / duration < 0.9 or len(chinese) / max(1, len(letters)) < 0.2:
         return None
+    if timed:
+        return {
+            "text": text,
+            "segments": [
+                {"id": index, "start": start, "end": min(end, duration), "text": value}
+                for index, (start, end, value) in enumerate(cues)
+            ],
+        }
     return text
 
 
-def _subtitles(info: dict, duration: float, work: Path) -> str | None:
+def _subtitles(info: dict, duration: float, work: Path, *, timed=False) -> str | dict | None:
     candidates = {**info.get("automatic_captions", {}), **info.get("subtitles", {})}
     for language, entries in candidates.items():
         if not language.lower().startswith(("zh", "cmn")):
@@ -466,7 +474,7 @@ def _subtitles(info: dict, duration: float, work: Path) -> str | None:
                             entry["url"], file, info.get("http_headers") or {}, MAX_SUBTITLE_BYTES
                         )
                     content = file.read_text(encoding="utf-8-sig")
-                text = subtitle_text(content or "", duration)
+                text = subtitle_text(content or "", duration, timed=timed)
                 if text:
                     return text
             except (OSError, ValueError):
@@ -474,19 +482,47 @@ def _subtitles(info: dict, duration: float, work: Path) -> str | None:
     return None
 
 
-def transcript_text(result: dict) -> str:
-    accepted = []
+def _accepted_speech(result: dict):
     for segment in result.get("segments") or []:
         if segment.get("no_speech_prob", 0) >= 0.6 and segment.get("avg_logprob", -2) < -0.5:
             continue
         if segment.get("compression_ratio", 0) > 2.4 or segment.get("avg_logprob", 0) < -1.2:
             continue
         if text := segment.get("text", "").strip():
-            accepted.append(text)
-    text = "\n".join(accepted).strip()
+            yield segment, text
+
+
+def transcript_text(result: dict) -> str:
+    text = "\n".join(text for _, text in _accepted_speech(result)).strip()
     if not text:
         raise MediaError("未检测到可识别的语音，请使用人声清晰的视频")
     return text
+
+
+def transcript_segments(result: dict, duration: float) -> dict:
+    segments = []
+    previous = 0.0
+    for segment, text in _accepted_speech(result):
+        start, end = segment.get("start"), segment.get("end")
+        if (
+            type(start) not in (int, float)
+            or type(end) not in (int, float)
+            or not math.isfinite(start)
+            or not math.isfinite(end)
+            or not 0 <= start < end
+        ):
+            raise MediaError("识别时间信息无效，请重新提取视频")
+        # Whisper may end a final token slightly past the audio boundary.
+        start, end = max(start, previous), min(end, duration)
+        if start >= end:
+            continue
+        segments.append({"id": len(segments), "start": start, "end": end, "text": text})
+        previous = end
+    if not segments:
+        raise MediaError("未检测到可识别的语音，请使用人声清晰的视频")
+    if len(segments) > 3000:
+        raise MediaError("识别分段过多，请将视频分成较短片段后导入")
+    return {"text": "\n".join(segment["text"] for segment in segments), "segments": segments}
 
 
 @contextlib.contextmanager
@@ -509,9 +545,10 @@ def _offline_inference():
             os.environ["HF_HUB_OFFLINE"] = previous
 
 
-def transcribe_audio(audio: Path, model: Path) -> str:
+def transcribe_audio(audio: Path, model: Path, *, timed=False) -> str | dict:
     with wave.open(str(audio), "rb") as recording:
-        if recording.getnframes() / recording.getframerate() > MAX_DURATION:
+        duration = recording.getnframes() / recording.getframerate()
+        if duration > MAX_DURATION:
             raise MediaError("实际音频超过 30 分钟，请裁剪后重新导入")
         samples = array.array("h", recording.readframes(recording.getnframes()))
     if not samples or math.sqrt(sum(value * value for value in samples) / len(samples)) < 12:
@@ -537,7 +574,7 @@ def transcribe_audio(audio: Path, model: Path) -> str:
             )
     except ImportError as error:
         raise MediaError("本地识别组件不可用，请在 Apple 芯片 Mac 上安装本地依赖") from error
-    return transcript_text(result)
+    return transcript_segments(result, duration) if timed else transcript_text(result)
 
 
 def run_pipeline(payload: dict, emit) -> dict:
@@ -556,9 +593,51 @@ def run_pipeline(payload: dict, emit) -> dict:
         raise MediaError("暂不支持此输入类型")
     emit({"type": "stage", "stage": "checking", "detail": "正在检查视频时长和音轨"})
     duration = probe_media(path)
-    if text := _subtitles(info, duration, work):
-        return {"text": text, "source": "subtitle"}
+    subtitles = _subtitles(info, duration, work, timed=True)
     emit({"type": "stage", "stage": "converting", "detail": "正在提取音轨"})
     audio = extract_audio(path, work)
+    if subtitles:
+        return {**subtitles, "source": "subtitle"}
     emit({"type": "stage", "stage": "transcribing", "detail": "正在本机识别完整音频，音视频不会上传"})
-    return {"text": transcribe_audio(audio, Path(payload["model_dir"])), "source": "transcription"}
+    return {**transcribe_audio(audio, Path(payload["model_dir"]), timed=True), "source": "transcription"}
+
+
+def run_retry(payload: dict, emit) -> dict:
+    """Crop the selected PCM frames locally; return a candidate, never edit history."""
+    start, end = payload.get("start"), payload.get("end")
+    if (
+        type(start) not in (int, float)
+        or type(end) not in (int, float)
+        or not math.isfinite(start)
+        or not math.isfinite(end)
+        or not 0 <= start < end <= MAX_DURATION
+    ):
+        raise MediaError("片段时间无效，请重新打开文稿后重试")
+    work = Path(payload["work_dir"]).resolve()
+    input_path = Path(payload["input"])
+    source = input_path.resolve()
+    if input_path.is_symlink() or (work / "clip.wav").is_symlink():
+        raise MediaError("回听音频不能是符号链接，请重新导入原视频")
+    if not work.is_dir() or not source.is_relative_to(work) or source == work or source.suffix != ".wav":
+        raise MediaError("回听音频必须位于当前任务目录内")
+    clip = work / "clip.wav"
+    emit({"type": "stage", "stage": "converting", "detail": "正在准备选中片段的音频"})
+    try:
+        with wave.open(str(source), "rb") as recording:
+            rate, count = recording.getframerate(), recording.getnframes()
+            if (recording.getnchannels(), recording.getsampwidth(), rate) != (1, 2, 16000):
+                raise MediaError("回听音频格式无效，请重新导入原视频")
+            if count > MAX_DURATION * rate or end > count / rate + 0.05:
+                raise MediaError("片段时间超出回听音频范围，请重新导入原视频")
+            first, last = int(start * rate), min(count, math.ceil(end * rate))
+            if first >= last:
+                raise MediaError("片段时间内没有音频，请重新导入原视频")
+            recording.setpos(first)
+            frames = recording.readframes(last - first)
+            with wave.open(str(clip), "wb") as output:
+                output.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                output.writeframes(frames)
+    except (OSError, wave.Error, EOFError) as error:
+        raise MediaError("回听音频无法读取，请重新导入原视频") from error
+    emit({"type": "stage", "stage": "transcribing", "detail": "正在本机重新识别选中片段"})
+    return {"text": transcribe_audio(clip, Path(payload["model_dir"])), "source": "transcription"}

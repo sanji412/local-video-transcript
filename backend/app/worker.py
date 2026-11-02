@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from .media import MediaError, run_pipeline
+from .media import MediaError, run_pipeline, run_retry
 from .models import ModelError, prepare_model
 
 
@@ -52,6 +52,8 @@ def main(args=None, protocol=None) -> int:
                     prepare_model(Path(payload["model_dir"]), emit, mode=payload["mode"])
             elif payload.get("kind") == "task":
                 emit({"type": "result", **run_pipeline(payload, emit)})
+            elif payload.get("kind") == "retry":
+                emit({"type": "result", **run_retry(payload, emit)})
             else:
                 raise MediaError("工作任务类型无效，请重新提交任务")
         return 0
