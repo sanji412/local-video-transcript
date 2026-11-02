@@ -154,3 +154,5 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .segment-row .draft-banner p { margin: 0 0 10px; white-space: pre-wrap; }
 .segment-row .draft-banner button { padding: 6px 12px; border: 1px solid #c9d6f4; border-radius: 6px; color: #3155b9; background: #fff; cursor: pointer; }
 .segment-editor audio { width: 100%; }
+.complete-surface textarea { min-height: 520px; color: #25334e; background: #fff; }
+.segment-row .draft-banner .decline-candidate { margin-left: 8px; border-color: transparent; background: transparent; color: #65718a; }

@@ -1,4 +1,4 @@
-import {render,screen,fireEvent,waitFor} from '@testing-library/react';
+import {render,screen,fireEvent,waitFor,act} from '@testing-library/react';
 import {StrictMode} from 'react';
 import {it,expect,vi} from 'vitest';
 import SegmentEditor from './SegmentEditor';
@@ -41,4 +41,21 @@ it('retains playable audio after development StrictMode effect replay',()=>{
  const record={id:'a',audio_available:true,segments:[{id:0,start:0,end:1,text:'稿'}]} as HistoryRecord;
  render(<StrictMode><SegmentEditor record={record} task={null} disabled={false} text={()=>'稿'} edit={vi.fn()} retry={vi.fn()} clear={vi.fn()} apply={vi.fn()}/></StrictMode>);
  expect(screen.getByLabelText('回听音频')).toHaveAttribute('src','/api/history/a/audio');
+});
+
+it('locks both candidate decisions while adoption is saving and preserves the candidate on failure',async()=>{
+ let fail!:(error:Error)=>void;
+ const apply=vi.fn(()=>new Promise<void>((_,reject)=>fail=reject));
+ const resolve=vi.fn();
+ const record={id:'a',segments:[{id:0,start:0,end:1,text:'当前稿',original_text:'原稿'}]} as HistoryRecord;
+ const task={id:'pending',kind:'retry',history_id:'a',segment_id:0,status:'completed',text:'候选'} as Task;
+ render(<SegmentEditor record={record} task={task} disabled={false} text={()=>'当前稿'} edit={vi.fn()} retry={vi.fn()} clear={vi.fn()} apply={apply} onResolve={resolve}/>);
+ fireEvent.click(screen.getByRole('button',{name:'采用识别结果'}));
+ expect(screen.getByRole('button',{name:'不采用'})).toBeDisabled();
+ expect(screen.getByRole('button',{name:'采用识别结果'})).toBeDisabled();
+ await act(async()=>fail(new Error('保存失败，请重试')));
+ expect(screen.getByRole('alert')).toHaveTextContent('保存失败，请重试');
+ expect(screen.getByRole('button',{name:'不采用'})).toBeEnabled();
+ expect(resolve).not.toHaveBeenCalled();
+ expect(screen.getByLabelText('片段 1')).toHaveValue('当前稿');
 });

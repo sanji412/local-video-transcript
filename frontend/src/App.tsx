@@ -23,7 +23,15 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
   const [recognitionMode, setRecognitionMode] = useState<RecognitionMode>('accurate');
   const [models, setModels] = useState<Session['models']>();
   const [historyRefresh, setHistoryRefresh] = useState(0);
-  const [originalVisible, setOriginalVisible] = useState(false);
+  const [manuscriptView, setManuscriptView] = useState<'edit' | 'complete' | 'original'>('edit');
+  const candidateResolutionKey = 'local-video-transcript:resolved-candidate';
+  const [resolvedCandidate, setResolvedCandidate] = useState<string | null>(() => {
+    try { return sessionStorage.getItem(candidateResolutionKey); } catch { return null; }
+  });
+  function resolveCandidate(id: string) {
+    setResolvedCandidate(id);
+    try { sessionStorage.setItem(candidateResolutionKey, id); } catch { /* Keep the in-memory choice. */ }
+  }
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState('');
   const [deleting, setDeleting] = useState(false);
@@ -157,7 +165,7 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
         next = await request<Task>('/tasks/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ share_text: link.trim(), mode: recognitionMode, retain_audio: retainAudio }) }, token);
       }
       if (currentVersion !== version.current) return;
-      manuscript.reset(); setOriginalVisible(false); setRenaming(false); setDeleting(false); setText(''); receiveTask(next);
+      manuscript.reset(); setManuscriptView('edit'); setRenaming(false); setDeleting(false); setText(''); receiveTask(next);
     } catch (e) { if (currentVersion === version.current) setError(errorMessage(e)); }
     finally { if (currentVersion === version.current) setBusy(false); }
   }
@@ -213,7 +221,7 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
     ++historyIntent.current;
     if (busy || active || connecting || id === manuscript.record?.id) return;
     setBusy(true);
-    if (await manuscript.open(id)) { if (task?.kind !== 'retry') setTask(null); setRenaming(false); setDeleting(false); setOriginalVisible(false); }
+    if (await manuscript.open(id)) { if (task?.kind !== 'retry') setTask(null); setRenaming(false); setDeleting(false); setManuscriptView('edit'); }
     setBusy(false);
   }
   async function removeHistory() {
@@ -274,16 +282,17 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
           {manuscript.record && <div className="record-header"><div><strong>{manuscript.record.title}</strong><p>{manuscript.record.source_ref} · {manuscript.record.mode === 'accurate' ? '精确识别' : '快速识别'}</p></div><div><button className="text-button" disabled={busy || active} onClick={() => {setRenaming(!renaming);setTitle(manuscript.record!.title);}}>重命名</button><button className="text-button" disabled={busy || active} onClick={() => setDeleting(!deleting)}>删除文稿</button></div></div>}
           {renaming && <form className="record-form" onSubmit={async e => {e.preventDefault();setBusy(true);if(await manuscript.rename(title.trim())){setRenaming(false);setHistoryRefresh(n=>n+1);}setBusy(false);}}><input aria-label="文稿标题" value={title} maxLength={200} onChange={e=>setTitle(e.target.value)} /><button disabled={!title.trim() || busy}>保存标题</button><button type="button" onClick={()=>setRenaming(false)}>取消</button></form>}
           {deleting && <div className="delete-confirm" role="alert"><p>删除这份文稿及其原始转写？此操作无法撤销。</p><button disabled={busy} onClick={removeHistory}>确认删除</button><button onClick={()=>setDeleting(false)}>保留文稿</button></div>}
-          {manuscript.record && <div className="manuscript-versions"><button aria-pressed={!originalVisible} onClick={()=>setOriginalVisible(false)}>编辑稿</button><button aria-pressed={originalVisible} onClick={()=>setOriginalVisible(true)}>原始转写</button><span aria-live="polite">{manuscript.saveState === 'saved' ? '已保存' : manuscript.saveState === 'saving' ? '保存中…' : '保存失败'}</span></div>}
+          {manuscript.record && <div className="manuscript-versions"><button aria-pressed={manuscriptView === 'edit'} onClick={()=>setManuscriptView('edit')}>编辑稿</button><button aria-pressed={manuscriptView === 'complete'} onClick={()=>setManuscriptView('complete')}>完整稿</button><button aria-pressed={manuscriptView === 'original'} onClick={()=>setManuscriptView('original')}>原始转写</button><span aria-live="polite">{manuscript.saveState === 'saved' ? '已保存' : manuscript.saveState === 'saving' ? '保存中…' : '保存失败'}</span></div>}
           {manuscript.saveState === 'error' || manuscript.saveState === 'conflict' ? <div role="alert" className="error-banner"><strong>保存失败{manuscript.saveState === 'conflict' ? '：文稿已在另一窗口更新' : ''}</strong><p>{manuscript.saveError}。当前编辑稿仍保留，请先导出备份。</p>{manuscript.saveState === 'conflict' ? <button className="text-button" disabled={busy} onClick={()=>{if(manuscript.record) void manuscript.open(manuscript.record.id,true);}}>重新载入最新稿</button> : <button className="text-button" onClick={()=>void manuscript.retry()}>重试保存</button>}</div> : null}
-          {originalVisible && manuscript.record && <div className="original-surface"><p>原始转写 · 只读，保留提取时的文字</p><textarea aria-label="原始转写全文" readOnly value={manuscript.record.original_text}/></div>}
+          {manuscriptView === 'complete' && manuscript.record && <div className="original-surface complete-surface"><p>最新编辑后的全文 · 在“编辑稿”中继续修改</p><textarea aria-label="编辑后的完整稿" readOnly value={text} /></div>}
+          {manuscriptView === 'original' && manuscript.record && <div className="original-surface"><p>原始转写 · 只读，保留提取时的文字</p><textarea aria-label="原始转写全文" readOnly value={manuscript.record.original_text}/></div>}
           {task && <div className={`task-status task-${task.status}`} aria-live="polite"><div><span className={`status-dot ${active ? 'is-working' : ''}`} /><strong>{statusLabels[task.status]}</strong><span className="stage-label">{stages[task.stage] || '处理中'}</span></div><p>{task.detail}</p>{active && <button className="text-button" onClick={cancel} disabled={busy || connecting}>{busy ? '正在取消…' : '取消任务'}</button>}{task.kind !== 'retry' && (task.status === 'failed' || task.status === 'cancelled') && <button className="text-button" onClick={submit} disabled={!canStart}>重试提取</button>}</div>}
           {visibleError && <div className="error-banner" role="alert"><strong>暂时无法完成</strong><p>{visibleError}</p>{session && !active && task?.status !== 'failed' && task?.status !== 'cancelled' && <button className="text-button" onClick={submit} disabled={!canStart}>重试提取</button>}<button className="text-button" onClick={reconnect} disabled={connecting || busy || modelBusy}>重新连接本地服务</button></div>}
           {pollError && <div className="error-banner" role="alert"><p>状态更新中断：{pollError}</p><button className="text-button" onClick={reconnect} disabled={connecting || busy || modelBusy}>重新连接</button></div>}
           {savedDraft && <div className="draft-banner" role="status"><span>上一份编辑文稿已保留。</span><button className="text-button" onClick={() => download(savedDraft, '上一份编辑文稿.txt')}>导出上一份文稿</button></div>}
-          {!originalVisible && Boolean(manuscript.record?.segments?.length) && <SegmentEditor record={manuscript.record!} task={task} disabled={Boolean(active || busy || connecting)} text={manuscript.segmentText} edit={manuscript.editSegment} retry={id=>void retrySegment(id)} clear={()=>void clearAudio()} apply={async(id,value)=>{if(!(await manuscript.flush())) throw new Error('请先保存当前编辑'); manuscript.editSegment(id,value); if(!(await manuscript.flush())) throw new Error('保存候选失败');}}/>}
+          {manuscriptView === 'edit' && Boolean(manuscript.record?.segments?.length) && <SegmentEditor resolvedTaskId={resolvedCandidate} onResolve={resolveCandidate} record={manuscript.record!} task={task} disabled={Boolean(active || busy || connecting)} text={manuscript.segmentText} edit={manuscript.editSegment} retry={id=>void retrySegment(id)} clear={()=>void clearAudio()} apply={async(id,value)=>{if(!(await manuscript.flush())) throw new Error('请先保存当前编辑'); manuscript.editSegment(id,value); if(!(await manuscript.flush())) throw new Error('保存候选失败');}}/>}
           {manuscript.record && !manuscript.record.segments?.length && <p className="field-hint">此文稿没有时间戳，重新导入原视频可获得分段回听与重新识别功能。</p>}
-          <div hidden={Boolean(manuscript.record?.segments?.length) || (originalVisible && Boolean(manuscript.record))} className={`editor-surface ${!text ? 'is-empty' : ''}`}>
+          <div hidden={Boolean(manuscript.record?.segments?.length) || (manuscriptView !== 'edit' && Boolean(manuscript.record))} className={`editor-surface ${!text ? 'is-empty' : ''}`}>
             <div className="line-gutter" ref={gutter} aria-hidden="true">{Array.from({ length: lines }, (_, i) => <span key={i}>{String(i + 1).padStart(2, '0')}</span>)}</div>
             <textarea aria-label="文稿全文" spellCheck={false} readOnly={!session || active || busy || connecting || manuscript.loading || (!manuscript.record && !(task?.status === 'completed' && !task.history_id))} value={text} maxLength={200000} onBlur={() => void manuscript.flush()} onChange={event => { manuscript.edit(event.target.value); setNotice(''); }} onScroll={event => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }} />
             {!text && <div className="empty-manuscript"><span className="paper-icon" aria-hidden="true"><i /><i /><i /></span><h3>{active ? '正在听，正在记录' : '文稿将在这里展开'}</h3><p>{active ? '处理阶段会实时显示，请稍候。' : '在左侧导入视频，开始你的第一份文稿。'}</p></div>}
