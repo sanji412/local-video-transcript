@@ -292,3 +292,33 @@ def test_probe_accepts_full_thirty_minutes(tmp_path, monkeypatch):
         ),
     )
     assert media.probe_media(path) == 1800
+
+
+@pytest.mark.parametrize(
+    ("share_text", "expected"),
+    [
+        (
+            "0.71 :1pm b@n.qR EHv:/ 07/18 学就完了，祝大家都是表达高手 # 表达 # 干货 "
+            "https://v.douyin.com/BCVusZue21g/ 复制此链接，打开Dou音搜索，直接观看视频！",
+            "学就完了，祝大家都是表达高手",
+        ),
+        (
+            "2.82 SYM:/ 04/15 :6pm y@g.oD 我宁愿痛苦，我不要麻木   "
+            "https://v.douyin.com/YxDhnVDo_AU/ 复制此链接，打开Dou音搜索，直接观看视频！",
+            "我宁愿痛苦，我不要麻木",
+        ),
+        ("表达训练\n每天  练习 😊 #表达 https://v.douyin.com/abc/", "表达训练 每天 练习 😊"),
+        ("2026 年的 3 个 AI 表达技巧！ https://v.douyin.com/abc/", "2026 年的 3 个 AI 表达技巧！"),
+        ("AI 2026：C# 入门 https://v.douyin.com/abc/", "AI 2026：C# 入门"),
+        ("0.71 的概率有多大 https://v.douyin.com/abc/", "0.71 的概率有多大"),
+        ("07/18 表达练习 https://v.douyin.com/abc/", "07/18 表达练习"),
+        ("0.71 :1pm b@n.qR EHv:/ 07/18 AI 2026 的表达 https://v.douyin.com/abc/", "AI 2026 的表达"),
+        ("表达技巧#表达#干货 https://v.douyin.com/abc/", "表达技巧"),
+        ("https://v.douyin.com/abc/ 复制此链接，打开抖音搜索，直接观看视频！", None),
+        ("0.71 :1pm b@n.qR EHv:/ 07/18 https://v.douyin.com/abc/", None),
+        ("#表达 #干货 https://v.douyin.com/abc/", None),
+        ("文" * 210 + " https://v.douyin.com/abc/", "文" * 200),
+    ],
+)
+def test_extract_share_title(share_text, expected):
+    assert media.extract_share_title(share_text) == expected

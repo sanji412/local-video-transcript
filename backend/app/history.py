@@ -33,9 +33,9 @@ class HistoryStore:
         finally:
             db.close()
 
-    def create(self, *, id, source_type, source_ref, text, source, mode):
+    def create(self, *, id, source_type, source_ref, text, source, mode, title=None):
         now = datetime.now(UTC).isoformat()
-        title = (source_ref if source_type == "file" else "链接文案")[:200]
+        title = (title or (source_ref if source_type == "file" else "链接文案"))[:200]
         with self._connection() as db:
             db.execute(
                 "INSERT INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?)",

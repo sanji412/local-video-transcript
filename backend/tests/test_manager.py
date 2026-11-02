@@ -180,6 +180,18 @@ def test_completion_is_durable_before_publishing_and_records_profile(runner):
     assert record["source_ref"] == "口播.mp4"
 
 
+def test_link_title_is_not_reused_for_the_next_task(runner):
+    url = "https://v.douyin.com/abc/"
+    task = runner.reserve_task("accurate", "link", url, source_title="表达技巧")
+    runner.start_reserved(task["id"], "link", url)
+    completed = wait_for(runner, task["id"], "completed")
+    assert runner.history.get(completed["history_id"])["title"] == "表达技巧"
+    task = runner.reserve_task("fast", "link", url)
+    runner.start_reserved(task["id"], "link", url)
+    completed = wait_for(runner, task["id"], "completed")
+    assert runner.history.get(completed["history_id"])["title"] == "链接文案"
+
+
 def test_history_write_failure_never_publishes_completion(runner, monkeypatch):
     def fail(**kwargs):
         raise OSError("disk full")

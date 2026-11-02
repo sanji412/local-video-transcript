@@ -121,11 +121,12 @@ class JobManager:
         if (self._task and self._task["status"] == "running") or self._process is not None:
             raise BusyError("已有任务正在处理，请等待完成或取消当前任务。")
 
-    def reserve_task(self, mode="fast", source_type=None, source_ref=None) -> dict:
+    def reserve_task(self, mode="fast", source_type=None, source_ref=None, *, source_title=None) -> dict:
         with self._lock:
             self._ensure_available()
             self.settings.model_path(mode)
             self._source_info = (source_type, source_ref)
+            self._source_title = source_title
             task_id = uuid.uuid4().hex
             self.task_dir(task_id).mkdir()
             self._task = {
@@ -297,6 +298,7 @@ class JobManager:
                                 text=result["text"],
                                 source=result["source"],
                                 mode=self._task["mode"],
+                                title=self._source_title,
                             )
                         except (OSError, sqlite3.Error, ValueError):
                             self._task.update(

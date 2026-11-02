@@ -58,3 +58,21 @@ def test_search_uses_literal_text_and_parameterized_sql(tmp_path):
     assert store.list("' OR 1=1 --") == []
     with pytest.raises(KeyError):
         store.update("missing", revision=0, title="名称")
+
+
+@pytest.mark.parametrize("title,expected", [(None, "链接文案"), ("分享标题", "分享标题")])
+def test_link_title_persists_and_remains_renameable(tmp_path, title, expected):
+    path = tmp_path / "history.sqlite3"
+    store = HistoryStore(path)
+    store.create(
+        id="link",
+        source_type="link",
+        source_ref="https://v.douyin.com/abc/",
+        text="正文",
+        source="transcription",
+        mode="fast",
+        title=title,
+    )
+    reopened = HistoryStore(path)
+    assert reopened.get("link")["title"] == expected
+    assert reopened.update("link", revision=0, title="自己的标题")["title"] == "自己的标题"

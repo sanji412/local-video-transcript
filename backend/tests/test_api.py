@@ -1,3 +1,7 @@
+import json
+import sys
+import time
+
 import pytest
 from app.config import Settings
 from app.main import create_app
@@ -45,6 +49,47 @@ def test_invalid_and_multiple_links_are_rejected(client):
         response = c.post("/api/tasks/link", headers=auth(c), json={"share_text": text})
         assert response.status_code == 422
         assert isinstance(response.json()["detail"], str)
+
+
+def test_share_title_is_saved_and_searchable_without_changing_source(client, monkeypatch):
+    c, manager = client
+    monkeypatch.setattr(manager, "start_reserved", JobManager.start_reserved.__get__(manager))
+    event = json.dumps({"type": "result", "text": "这里只保存完整口播正文。", "source": "transcription"})
+    monkeypatch.setattr(
+        manager,
+        "_command_builder",
+        lambda payload: [
+            sys.executable,
+            "-c",
+            "import json,sys; "
+            "assert json.load(open(sys.argv[1]))['input'] == 'https://v.douyin.com/BCVusZue21g/'; "
+            f"print({event!r})",
+            str(payload),
+        ],
+    )
+    response = c.post(
+        "/api/tasks/link",
+        headers=auth(c),
+        json={
+            "share_text": "0.71 :1pm b@n.qR EHv:/ 07/18 学就完了，祝大家都是表达高手 "
+            "# 表达 # 干货 https://v.douyin.com/BCVusZue21g/ "
+            "复制此链接，打开Dou音搜索，直接观看视频！"
+        },
+    )
+    assert response.status_code == 202
+    task_id = response.json()["id"]
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        task = c.get(f"/api/tasks/{task_id}").json()
+        if task["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert task["status"] == "completed"
+    record = c.get(f"/api/history/{task['history_id']}").json()
+    assert record["title"] == "学就完了，祝大家都是表达高手"
+    assert record["source_ref"] == "https://v.douyin.com/BCVusZue21g/"
+    assert record["original_text"] == record["edited_text"] == "这里只保存完整口播正文。"
+    assert c.get("/api/history", params={"q": "表达高手"}).json()["items"][0]["id"] == task_id
 
 
 def test_task_submission_busy_cancel_and_retry(client):

@@ -193,7 +193,7 @@ def create_app(settings=None, manager=None):
 
     @app.post("/api/tasks/link", status_code=202)
     def link_task(body: LinkInput, request: Request):
-        from .media import extract_link
+        from .media import extract_link, extract_share_title
 
         m = get_manager(request)
         try:
@@ -201,7 +201,7 @@ def create_app(settings=None, manager=None):
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         ensure_ready(m, body.mode)
-        task = m.reserve_task(body.mode, "link", url)
+        task = m.reserve_task(body.mode, "link", url, source_title=extract_share_title(body.share_text))
         try:
             m.start_reserved(task["id"], "link", url)
         except Exception:

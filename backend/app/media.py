@@ -71,6 +71,21 @@ def extract_link(text: str) -> str:
     return _valid_source(links[0].rstrip("。，、！!？?；;：:）)]}"))
 
 
+def extract_share_title(text: str) -> str | None:
+    """Read the title before the URL; call after extract_link validates the share."""
+    link = re.search(r"https?://", text, flags=re.IGNORECASE)
+    if link is None:
+        return None
+    title = " ".join(text[: link.start()].split())
+    # Only consume a numbered share prefix followed by recognizable code/date
+    # tokens. Ordinary numbers, English words and punctuation belong to the title.
+    code = r"(?:\d{1,2}/\d{1,2}|[A-Za-z0-9._-]+@[A-Za-z0-9._-]+|[A-Za-z0-9._-]+:/|:[A-Za-z0-9]+)"
+    title = re.sub(rf"^\d+\.\d{{2}}\s+(?:{code}(?:\s+|$))+", "", title)
+    # Keep programming language names such as C# while removing share hashtags.
+    title = re.split(r"(?<![A-Za-z0-9])#", title, maxsplit=1)[0].strip()
+    return title[:200].rstrip() or None
+
+
 def _allowed_host(host: str) -> bool:
     host = host.lower().rstrip(".")
     return any(host == domain or host.endswith("." + domain) for domain in NETWORK_DOMAINS)
