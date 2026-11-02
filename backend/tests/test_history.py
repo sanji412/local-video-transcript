@@ -76,3 +76,24 @@ def test_link_title_persists_and_remains_renameable(tmp_path, title, expected):
     reopened = HistoryStore(path)
     assert reopened.get("link")["title"] == expected
     assert reopened.update("link", revision=0, title="自己的标题")["title"] == "自己的标题"
+
+
+def test_segment_edit_preserves_original_and_alignment(tmp_path):
+    store = HistoryStore(tmp_path / "history.sqlite3")
+    store.create(
+        id="abc",
+        source_type="file",
+        source_ref="a.mp4",
+        text="甲\n乙",
+        source="transcription",
+        mode="fast",
+        segments=[
+            {"id": 0, "start": 0, "end": 1, "text": "甲"},
+            {"id": 1, "start": 1, "end": 2, "text": "乙"},
+        ],
+    )
+    changed = store.update_segment("abc", 0, revision=0, text="改")
+    assert changed["edited_text"] == "改\n乙"
+    assert changed["segments"][0]["original_text"] == "甲"
+    with pytest.raises(HistoryConflict):
+        store.update("abc", revision=1, edited_text="错误")
