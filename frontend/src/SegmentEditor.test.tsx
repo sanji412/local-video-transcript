@@ -1,4 +1,5 @@
 import {render,screen,fireEvent,waitFor} from '@testing-library/react';
+import {StrictMode} from 'react';
 import {it,expect,vi} from 'vitest';
 import SegmentEditor from './SegmentEditor';
 import type {HistoryRecord,Task} from './api';
@@ -34,4 +35,10 @@ it('keeps the new audio source when switching manuscripts',()=>{
  view.rerender(<SegmentEditor {...props} record={{...record,id:'b'}}/>);
  expect(screen.getByLabelText('回听音频')).toHaveAttribute('src','/api/history/b/audio');
  expect(oldAudio).not.toHaveAttribute('src');
+});
+
+it('retains playable audio after development StrictMode effect replay',()=>{
+ const record={id:'a',audio_available:true,segments:[{id:0,start:0,end:1,text:'稿'}]} as HistoryRecord;
+ render(<StrictMode><SegmentEditor record={record} task={null} disabled={false} text={()=>'稿'} edit={vi.fn()} retry={vi.fn()} clear={vi.fn()} apply={vi.fn()}/></StrictMode>);
+ expect(screen.getByLabelText('回听音频')).toHaveAttribute('src','/api/history/a/audio');
 });

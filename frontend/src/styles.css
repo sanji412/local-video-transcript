@@ -150,4 +150,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .segment-row textarea { width: 100%; min-height: 90px; resize: vertical; font: inherit; line-height: 1.8; padding: 12px; border: 1px solid #dedbd4; border-radius: 8px; background: transparent; color: inherit; }
 
 .segment-list { max-height: 58vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 8px; }
+.segment-row .draft-banner { display: block; margin: 10px 0; padding: 14px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.segment-row .draft-banner p { margin: 0 0 10px; white-space: pre-wrap; }
+.segment-row .draft-banner button { padding: 6px 12px; border: 1px solid #c9d6f4; border-radius: 6px; color: #3155b9; background: #fff; cursor: pointer; }
 .segment-editor audio { width: 100%; }

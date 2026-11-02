@@ -17,6 +17,10 @@ export default function SegmentEditor({ record, disabled, text, edit, retry, app
     useEffect(() => {
         const player = audio.current;
         boundary.current = null;
+        // StrictMode replays setup after cleanup without remounting this node.
+        if (player && !player.getAttribute('src')) {
+            player.setAttribute('src', `/api/history/${encodeURIComponent(record.id)}/audio`);
+        }
         return () => {
             boundary.current = null;
             if (player) {
