@@ -365,3 +365,54 @@ def test_segment_save_retry_validation_and_exclusion(client, monkeypatch):
     )
     assert c.post(f"/api/tasks/{retry.json()['id']}/cancel", headers=auth(c)).status_code == 200
     assert c.get("/api/history/timed").json()["edited_text"] == "校对甲\n乙"
+
+
+def test_batch_api_preview_controls_and_limits(client):
+    c, m = client
+    headers = auth(c)
+    assert c.post("/api/batches/preview", json={"share_text": "x"}).status_code == 403
+    response = c.post(
+        "/api/batches/preview",
+        headers=headers,
+        json={"share_text": "https://v.douyin.com/ABC/\nhttps://v.douyin.com/ABC/?foo=1"},
+    )
+    assert response.status_code == 200
+    assert [x["status"] for x in response.json()["items"]] == ["ready", "duplicate"]
+    assert (
+        c.post("/api/batches/preview", headers=headers, json={"share_text": "中" * 200001}).status_code == 422
+    )
+    assert c.post("/api/tasks/link", headers=headers, json={"share_text": "中" * 12000}).status_code == 413
+    response = c.post(
+        "/api/batches", headers=headers, json={"items": [{"share_text": "https://v.douyin.com/ABC/"}]}
+    )
+    assert response.status_code == 202
+    batch = response.json()
+    assert c.get("/api/session").json()["batch"]["id"] == batch["id"]
+    assert c.get("/api/batches/current").json()["batch"]["id"] == batch["id"]
+    assert (
+        c.post(f"/api/batches/{batch['id']}/actions", headers=headers, json={"action": "cancel"}).status_code
+        == 200
+    )
+
+
+def test_duplicate_link_409_and_force_preserves_old_edits(client):
+    c, m = client
+    m.history.create(
+        id="old",
+        source_type="link",
+        source_ref="https://v.douyin.com/AbC/",
+        text="original",
+        source="transcription",
+        mode="fast",
+    )
+    m.history.update("old", revision=0, edited_text="edited")
+    response = c.post(
+        "/api/tasks/link", headers=auth(c), json={"share_text": "https://v.douyin.com/AbC/?track=1"}
+    )
+    assert response.status_code == 409
+    assert response.json()["duplicate"]["id"] == "old"
+    response = c.post(
+        "/api/tasks/link", headers=auth(c), json={"share_text": "https://v.douyin.com/AbC/", "force": True}
+    )
+    assert response.status_code == 202
+    assert m.history.get("old")["edited_text"] == "edited"

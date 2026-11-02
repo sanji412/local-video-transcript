@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { request, type ModelStatus, type Session, type Task } from './api';
+import { ApiError, request, type ModelStatus, type Session, type Task } from './api';
 import './styles.css';
+import Efficiency from './Efficiency';
+import { BatchInput, QueuePanel, useBatch, batchBusy } from './BatchPanel';
 import SegmentEditor from './SegmentEditor';
 import HistoryPanel from './HistoryPanel';
 import { useManuscript } from './useManuscript';
@@ -14,7 +16,7 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
   const [session, setSession] = useState<Session | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
   const [task, setTask] = useState<Task | null>(null);
-  const [mode, setMode] = useState<'link' | 'file'>('link');
+  const [mode, setMode] = useState<'link' | 'file' | 'batch'>('link');
   const [link, setLink] = useState('');
   const [retainAudio, setRetainAudio] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -49,10 +51,18 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
   const linkTab = useRef<HTMLButtonElement>(null);
   const fileTab = useRef<HTMLButtonElement>(null);
   const token = session?.token;
+  const queue = useBatch(token, session?.batch, pollInterval, connecting);
+  const queueActive = batchBusy(queue.batch);
+  const [duplicate, setDuplicate] = useState<Pick<HistorySummary, 'id' | 'title'> | null>(null);
+  useEffect(() => { setDuplicate(null); }, [link, mode]);
+  const batchTab = useRef<HTMLButtonElement>(null);
   const active = task?.status === 'running';
+  const occupied = active || queueActive;
 
   function receiveTask(next: Task) {
+    if (next.batch_id) return;
     setTask(next);
+    if (next.stage === 'duplicate' && next.history_id) { setDuplicate({id:next.history_id,title:'已有文稿'}); return; }
     if (next.kind === 'retry') {
       if (!manuscript.record && next.history_id) void manuscript.open(next.history_id);
       return;
@@ -71,7 +81,9 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
     request<Session>('/session', { signal: controller.signal }).then(next => {
       if (controller.signal.aborted || currentVersion !== version.current) return;
       setSession(next); setModels(next.models); setModel(next.models?.[recognitionMode] || next.model);
-      if (next.active_task) {
+      if (next.active_task?.batch_id) {
+        setTask(null);
+      } else if (next.active_task) {
         if (next.active_task.id !== task?.id) {
           if (dirty.current && text) setSavedDraft(text);
           if (manuscript.record && dirty.current) { setTask(next.active_task); return; }
@@ -80,9 +92,9 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
         receiveTask(next.active_task);
       } else {
         setTask(null);
-        if (task?.status === 'running' && !dirty.current) setText('');
+        if (task?.status === 'running' && !task.batch_id && !dirty.current && !next.batch) setText('');
         else if (text) setNotice('已保留文稿，可继续编辑或导出');
-        if (!manuscript.record && !dirty.current) {
+        if (!manuscript.record && !dirty.current && !next.batch) {
           request<{items: HistorySummary[]}>('/history?q=', {signal: controller.signal}).then(result => {
             if (!controller.signal.aborted && currentVersion === version.current && restoreIntent === historyIntent.current && !dirty.current && result.items?.[0]) void manuscript.open(result.items[0].id);
           }).catch(e => { if (!controller.signal.aborted) setError(errorMessage(e)); });
@@ -147,9 +159,9 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
 
   const toolsReady = session?.dependencies.ffmpeg && session.dependencies.ffprobe;
   const inputReady = mode === 'link' ? Boolean(link.trim()) : Boolean(file);
-  const canStart = Boolean(token && toolsReady && model?.status === 'ready' && inputReady && !active && !busy && !modelBusy && !downloadingMode && !connecting);
+  const canStart = Boolean(mode !== 'batch' && token && toolsReady && model?.status === 'ready' && inputReady && !occupied && !busy && !queue.mutating && !modelBusy && !downloadingMode && !connecting);
 
-  async function submit() {
+  async function submit(force = false) {
     if (!canStart) return;
     ++historyIntent.current;
     setBusy(true);
@@ -162,23 +174,24 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
         const body = new FormData(); body.append('file', file!); body.append('mode', recognitionMode); body.append('retain_audio', String(retainAudio));
         next = await request<Task>('/tasks/file', { method: 'POST', body }, token);
       } else {
-        next = await request<Task>('/tasks/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ share_text: link.trim(), mode: recognitionMode, retain_audio: retainAudio }) }, token);
+        next = await request<Task>('/tasks/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ share_text: link.trim(), mode: recognitionMode, retain_audio: retainAudio, ...(force ? {force:true} : {}) }) }, token);
       }
       if (currentVersion !== version.current) return;
-      manuscript.reset(); setManuscriptView('edit'); setRenaming(false); setDeleting(false); setText(''); receiveTask(next);
-    } catch (e) { if (currentVersion === version.current) setError(errorMessage(e)); }
+      if (next.stage === 'duplicate') { receiveTask(next); return; }
+      setDuplicate(null); manuscript.reset(); setManuscriptView('edit'); setRenaming(false); setDeleting(false); setText(''); receiveTask(next);
+    } catch (e) { if (currentVersion === version.current) { setError(errorMessage(e)); if(e instanceof ApiError && e.duplicate) setDuplicate(e.duplicate); } }
     finally { if (currentVersion === version.current) setBusy(false); }
   }
 
   async function retrySegment(id: number) {
-    if (!token || !manuscript.record || active || busy) return;
+    if (!token || !manuscript.record || occupied || busy) return;
     setBusy(true); setError('');
     try { if (!(await manuscript.flush())) return;
       receiveTask(await request<Task>(`/history/${manuscript.record.id}/segments/${id}/recognize`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:manuscript.currentRecord()!.revision,mode:recognitionMode})},token));
     } catch(e){setError(errorMessage(e));} finally{setBusy(false);}
   }
   async function clearAudio() {
-    if (!token || !manuscript.record || active || busy) return;
+    if (!token || !manuscript.record || occupied || busy) return;
     setBusy(true);
     try { if (!(await manuscript.flush())) return;
       await request(`/history/${manuscript.record.id}/audio`,{method:'DELETE'},token);
@@ -197,7 +210,7 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
   }
 
   async function prepareModel() {
-    if (!token || modelBusy || active || downloadingMode || connecting) return;
+    if (!token || modelBusy || occupied || downloadingMode || connecting) return;
     setModelBusy(true); setError(''); setPollError('');
     try { const next = await request<ModelStatus>(`/model/download?mode=${recognitionMode}`, { method: 'POST' }, token); setModel(next); setModels(previous => previous ? {...previous, [recognitionMode]: next} : previous); }
     catch (e) { setError(errorMessage(e)); }
@@ -219,7 +232,7 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
 
   async function selectHistory(id: string) {
     ++historyIntent.current;
-    if (busy || active || connecting || id === manuscript.record?.id) return;
+    if (busy || occupied || connecting || id === manuscript.record?.id) return;
     setBusy(true);
     if (await manuscript.open(id)) { if (task?.kind !== 'retry') setTask(null); setRenaming(false); setDeleting(false); setManuscriptView('edit'); }
     setBusy(false);
@@ -253,48 +266,53 @@ export default function App({ pollInterval = 1200, autosaveDelay = 700 }: { poll
           <div className="section-heading"><span className="section-index">01</span><div><h2 id="source-title">导入素材</h2><p>从链接或本地视频开始</p></div></div>
           <div className="input-tabs" role="tablist" aria-label="素材来源" onKeyDown={event => {
             if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-              event.preventDefault(); const next = mode === 'link' ? 'file' : 'link'; setMode(next); (next === 'link' ? linkTab : fileTab).current?.focus();
+              event.preventDefault(); const modes = ['link', 'file', 'batch'] as const; const next = modes[(modes.indexOf(mode) + (event.key === 'ArrowRight' ? 1 : 2)) % 3]; setMode(next); ({link:linkTab,file:fileTab,batch:batchTab}[next]).current?.focus();
             }
           }}>
             <button ref={linkTab} role="tab" aria-selected={mode === 'link'} aria-controls="source-input" id="link-tab" tabIndex={mode === 'link' ? 0 : -1} onClick={() => setMode('link')}>抖音链接</button>
             <button ref={fileTab} role="tab" aria-selected={mode === 'file'} aria-controls="source-input" id="file-tab" tabIndex={mode === 'file' ? 0 : -1} onClick={() => setMode('file')}>本地 MP4</button>
+            <button ref={batchTab} role="tab" aria-selected={mode === 'batch'} aria-controls="source-input" id="batch-tab" tabIndex={mode === 'batch' ? 0 : -1} onClick={() => setMode('batch')}>批量链接</button>
           </div>
           <div id="source-input" role="tabpanel" aria-labelledby={`${mode}-tab`} className="input-area">
-            {mode === 'link' ? <><label className="field-label" htmlFor="share-link">抖音分享链接</label><textarea id="share-link" value={link} onChange={e => setLink(e.target.value)} placeholder="粘贴单条视频链接，或整段分享内容…" disabled={active || busy || connecting} /><p className="field-hint">支持分享短链接与视频页面链接，一次提取一条。</p></> : <><label className={`file-picker ${file ? 'has-file' : ''}`}><span className="file-symbol" aria-hidden="true">↑</span><strong>{file ? file.name : '选择一个 MP4 视频'}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · 点击重新选择` : '点击选择本地文件'}</span><input type="file" accept=".mp4,video/mp4" aria-label="选择 MP4 文件" disabled={active || busy || connecting} onChange={e => setFile(e.target.files?.[0] ?? null)} /></label><p className="field-hint">视频仅在本机处理，不会修改你的原文件。</p></>}
+            <div hidden={mode !== 'batch'}><BatchInput disabled={Boolean(occupied || busy || queue.mutating || connecting || modelBusy || downloadingMode)} canStart={Boolean(token && toolsReady && model?.status === 'ready')} previewToken={token} start={async items => { if (occupied || busy || connecting || queue.mutating) return; setBusy(true); try { if (!(await manuscript.flush())) return; await queue.mutate('/batches', {items, mode:recognitionMode, retain_audio:retainAudio}); } finally {setBusy(false);} }} /></div>{mode === 'batch' ? null : mode === 'link' ? <><label className="field-label" htmlFor="share-link">抖音分享链接</label><textarea id="share-link" value={link} onChange={e => setLink(e.target.value)} placeholder="粘贴单条视频链接，或整段分享内容…" disabled={occupied || busy || connecting} /><p className="field-hint">支持分享短链接与视频页面链接，一次提取一条。</p></> : <><label className={`file-picker ${file ? 'has-file' : ''}`}><span className="file-symbol" aria-hidden="true">↑</span><strong>{file ? file.name : '选择一个 MP4 视频'}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · 点击重新选择` : '点击选择本地文件'}</span><input type="file" accept=".mp4,video/mp4" aria-label="选择 MP4 文件" disabled={occupied || busy || connecting} onChange={e => setFile(e.target.files?.[0] ?? null)} /></label><p className="field-hint">视频仅在本机处理，不会修改你的原文件。</p></>}
           </div>
-          <label className="field-hint"><input type="checkbox" checked={retainAudio} disabled={active || busy} onChange={e=>setRetainAudio(e.target.checked)}/> 随文稿保存回听音频</label><p className="field-hint">默认临时缓存，下次提取或服务重启时清理。</p>
-          <label className="recognition-choice">识别模式<select aria-label="识别模式" value={recognitionMode} disabled={active || busy || connecting || modelBusy} onChange={e => { const next = e.target.value as RecognitionMode; setRecognitionMode(next); if (models) setModel(models[next]); }}><option value="accurate">精确识别 · large-v3</option><option value="fast">快速识别 · turbo</option></select><span>{recognitionMode === 'accurate' ? '更细致地识别口播，耗时较长 · 模型约 3.1 GB' : '适合快速整理初稿 · 模型约 1.6 GB'}</span></label>
+          <label className="field-hint"><input type="checkbox" checked={retainAudio} disabled={occupied || busy} onChange={e=>setRetainAudio(e.target.checked)}/> 随文稿保存回听音频</label><p className="field-hint">默认临时缓存，下次提取或服务重启时清理。</p>
+          <label className="recognition-choice">识别模式<select aria-label="识别模式" value={recognitionMode} disabled={occupied || busy || connecting || modelBusy} onChange={e => { const next = e.target.value as RecognitionMode; setRecognitionMode(next); if (models) setModel(models[next]); }}><option value="accurate">精确识别 · large-v3</option><option value="fast">快速识别 · turbo</option></select><span>{recognitionMode === 'accurate' ? '更细致地识别口播，耗时较长 · 模型约 3.1 GB' : '适合快速整理初稿 · 模型约 1.6 GB'}</span></label>
           <div className={`model-card ${model?.status === 'ready' ? 'is-ready' : ''}`}>
             <div className="model-title"><span className={`status-dot ${model?.status === 'downloading' ? 'is-working' : ''}`} /><strong>本地识别模型</strong><span className="model-state">{!model ? (error ? '无法连接' : '检查中') : { ready: '已就绪', missing: '待准备', downloading: '准备中', error: '需重试' }[model.status]}</span></div>
             <p>{model?.detail || (error ? '连接本地服务后，即可检查模型。' : '正在检查本机环境…')}</p>
             {model?.status === 'downloading' && <progress aria-label="模型下载进度" aria-valuetext={model.progress === null ? undefined : `${Math.round(model.progress * 100)}%`} max={1} value={model.progress ?? undefined} />}
-            {model && (model.status === 'missing' || model.status === 'error') && <><p className="model-explanation">首次使用需要联网下载模型，准备好后可离线转写本地视频。</p><button className="text-button" disabled={modelBusy || active || connecting || Boolean(downloadingMode)} onClick={prepareModel}>{modelBusy ? '开始下载…' : model.status === 'error' ? '重新下载模型' : '下载模型'}<span aria-hidden="true"> ↗</span></button></>}
+            {model && (model.status === 'missing' || model.status === 'error') && <><p className="model-explanation">首次使用需要联网下载模型，准备好后可离线转写本地视频。</p><button className="text-button" disabled={modelBusy || occupied || connecting || Boolean(downloadingMode)} onClick={prepareModel}>{modelBusy ? '开始下载…' : model.status === 'error' ? '重新下载模型' : '下载模型'}<span aria-hidden="true"> ↗</span></button></>}
           </div>
           {session && !toolsReady && <p className="tool-warning" role="alert">缺少 FFmpeg 或 ffprobe。请先按启动说明安装本地音视频工具，再重新打开工作台。</p>}
-          <button className="primary-button" disabled={!canStart} onClick={submit}>{busy && !active ? '正在提交…' : '开始提取'}<span aria-hidden="true">→</span></button>
+          {mode !== 'batch' && <button className="primary-button" disabled={!canStart} onClick={()=>void submit()}>{busy && !active ? '正在提交…' : '开始提取'}<span aria-hidden="true">→</span></button>}
           {model && model.status !== 'ready' && <p className="submit-hint">模型就绪后，即可开始提取。</p>}
           <div className="privacy-note"><span aria-hidden="true">⌁</span><p>内容留在本机<span>链接获取与模型下载需要联网。</span></p></div>
         </section>
-        <HistoryPanel selected={manuscript.record?.id} refresh={historyRefresh} disabled={busy || active || connecting} onSelect={id => void selectHistory(id)} />
+        <QueuePanel queue={queue} reconnect={reconnect} disabled={busy || connecting || Boolean(active)} onOpen={id=>void selectHistory(id)}/>
+        <HistoryPanel selected={manuscript.record?.id} refresh={historyRefresh} disabled={busy || occupied || connecting} onSelect={id => void selectHistory(id)} />
         </div>
         <section className="manuscript-panel panel" aria-labelledby="manuscript-title">
           <div className="manuscript-toolbar"><div className="section-heading"><span className="section-index">02</span><div><h2 id="manuscript-title">文稿</h2><p>{(manuscript.record?.source || task?.source) ? ((manuscript.record?.source || task?.source) === 'subtitle' ? '字幕提取' : '语音转写') : '提取后，可直接在此校对'}</p></div></div><div className="export-actions"><button disabled={!text.trim()} onClick={copy}>复制全文</button><button disabled={!text.trim()} onClick={() => download()}>导出 TXT<span aria-hidden="true"> ↗</span></button></div></div>
-          {manuscript.record && <div className="record-header"><div><strong>{manuscript.record.title}</strong><p>{manuscript.record.source_ref} · {manuscript.record.mode === 'accurate' ? '精确识别' : '快速识别'}</p></div><div><button className="text-button" disabled={busy || active} onClick={() => {setRenaming(!renaming);setTitle(manuscript.record!.title);}}>重命名</button><button className="text-button" disabled={busy || active} onClick={() => setDeleting(!deleting)}>删除文稿</button></div></div>}
+          {manuscript.record && <div className="record-header"><div><strong>{manuscript.record.title}</strong><p>{manuscript.record.source_ref} · {manuscript.record.mode === 'accurate' ? '精确识别' : '快速识别'}</p></div><div><button className="text-button" disabled={busy || occupied} onClick={() => {setRenaming(!renaming);setTitle(manuscript.record!.title);}}>重命名</button><button className="text-button" disabled={busy || occupied} onClick={() => setDeleting(!deleting)}>删除文稿</button></div></div>}
           {renaming && <form className="record-form" onSubmit={async e => {e.preventDefault();setBusy(true);if(await manuscript.rename(title.trim())){setRenaming(false);setHistoryRefresh(n=>n+1);}setBusy(false);}}><input aria-label="文稿标题" value={title} maxLength={200} onChange={e=>setTitle(e.target.value)} /><button disabled={!title.trim() || busy}>保存标题</button><button type="button" onClick={()=>setRenaming(false)}>取消</button></form>}
           {deleting && <div className="delete-confirm" role="alert"><p>删除这份文稿及其原始转写？此操作无法撤销。</p><button disabled={busy} onClick={removeHistory}>确认删除</button><button onClick={()=>setDeleting(false)}>保留文稿</button></div>}
           {manuscript.record && <div className="manuscript-versions"><button aria-pressed={manuscriptView === 'edit'} onClick={()=>setManuscriptView('edit')}>编辑稿</button><button aria-pressed={manuscriptView === 'complete'} onClick={()=>setManuscriptView('complete')}>完整稿</button><button aria-pressed={manuscriptView === 'original'} onClick={()=>setManuscriptView('original')}>原始转写</button><span aria-live="polite">{manuscript.saveState === 'saved' ? '已保存' : manuscript.saveState === 'saving' ? '保存中…' : '保存失败'}</span></div>}
           {manuscript.saveState === 'error' || manuscript.saveState === 'conflict' ? <div role="alert" className="error-banner"><strong>保存失败{manuscript.saveState === 'conflict' ? '：文稿已在另一窗口更新' : ''}</strong><p>{manuscript.saveError}。当前编辑稿仍保留，请先导出备份。</p>{manuscript.saveState === 'conflict' ? <button className="text-button" disabled={busy} onClick={()=>{if(manuscript.record) void manuscript.open(manuscript.record.id,true);}}>重新载入最新稿</button> : <button className="text-button" onClick={()=>void manuscript.retry()}>重试保存</button>}</div> : null}
           {manuscriptView === 'complete' && manuscript.record && <div className="original-surface complete-surface"><p>最新编辑后的全文 · 在“编辑稿”中继续修改</p><textarea aria-label="编辑后的完整稿" readOnly value={text} /></div>}
           {manuscriptView === 'original' && manuscript.record && <div className="original-surface"><p>原始转写 · 只读，保留提取时的文字</p><textarea aria-label="原始转写全文" readOnly value={manuscript.record.original_text}/></div>}
-          {task && <div className={`task-status task-${task.status}`} aria-live="polite"><div><span className={`status-dot ${active ? 'is-working' : ''}`} /><strong>{statusLabels[task.status]}</strong><span className="stage-label">{stages[task.stage] || '处理中'}</span></div><p>{task.detail}</p>{active && <button className="text-button" onClick={cancel} disabled={busy || connecting}>{busy ? '正在取消…' : '取消任务'}</button>}{task.kind !== 'retry' && (task.status === 'failed' || task.status === 'cancelled') && <button className="text-button" onClick={submit} disabled={!canStart}>重试提取</button>}</div>}
-          {visibleError && <div className="error-banner" role="alert"><strong>暂时无法完成</strong><p>{visibleError}</p>{session && !active && task?.status !== 'failed' && task?.status !== 'cancelled' && <button className="text-button" onClick={submit} disabled={!canStart}>重试提取</button>}<button className="text-button" onClick={reconnect} disabled={connecting || busy || modelBusy}>重新连接本地服务</button></div>}
+          {duplicate && <div className="draft-banner" role="status"><p>发现已有文稿：{duplicate.title}。重新提取会另存一份。</p><button className="text-button" disabled={busy || occupied || connecting} onClick={()=>{void selectHistory(duplicate.id);setDuplicate(null);setError('');}}>打开已有文稿</button><button className="text-button" disabled={!canStart} onClick={()=>void submit(true)}>仍要重新提取</button></div>}
+          {task?.kind === 'retry' && task.history_id === manuscript.record?.id && <p className="field-hint">本次局部识别耗时</p>}
+          {(manuscript.record || task) && <Efficiency value={task && (active || (task.kind === 'retry' && task.history_id === manuscript.record?.id)) ? task : manuscript.record || task!} source={task && (active || (task.kind === 'retry' && task.history_id === manuscript.record?.id)) ? task.source : manuscript.record?.source || task?.source} running={Boolean(active)}/>}
+          {task && <div className={`task-status task-${task.status}`} aria-live="polite"><div><span className={`status-dot ${active ? 'is-working' : ''}`} /><strong>{statusLabels[task.status]}</strong><span className="stage-label">{stages[task.stage] || '处理中'}</span></div><p>{task.detail}</p>{active && <button className="text-button" onClick={cancel} disabled={busy || connecting}>{busy ? '正在取消…' : '取消任务'}</button>}{task.kind !== 'retry' && (task.status === 'failed' || task.status === 'cancelled') && <button className="text-button" onClick={()=>void submit()} disabled={!canStart}>重试提取</button>}</div>}
+          {visibleError && <div className="error-banner" role="alert"><strong>暂时无法完成</strong><p>{visibleError}</p>{session && !active && task?.status !== 'failed' && task?.status !== 'cancelled' && <button className="text-button" onClick={()=>void submit()} disabled={!canStart}>重试提取</button>}<button className="text-button" onClick={reconnect} disabled={connecting || busy || modelBusy}>重新连接本地服务</button></div>}
           {pollError && <div className="error-banner" role="alert"><p>状态更新中断：{pollError}</p><button className="text-button" onClick={reconnect} disabled={connecting || busy || modelBusy}>重新连接</button></div>}
           {savedDraft && <div className="draft-banner" role="status"><span>上一份编辑文稿已保留。</span><button className="text-button" onClick={() => download(savedDraft, '上一份编辑文稿.txt')}>导出上一份文稿</button></div>}
-          {manuscriptView === 'edit' && Boolean(manuscript.record?.segments?.length) && <SegmentEditor resolvedTaskId={resolvedCandidate} onResolve={resolveCandidate} record={manuscript.record!} task={task} disabled={Boolean(active || busy || connecting)} text={manuscript.segmentText} edit={manuscript.editSegment} retry={id=>void retrySegment(id)} clear={()=>void clearAudio()} apply={async(id,value)=>{if(!(await manuscript.flush())) throw new Error('请先保存当前编辑'); manuscript.editSegment(id,value); if(!(await manuscript.flush())) throw new Error('保存候选失败');}}/>}
+          {manuscriptView === 'edit' && Boolean(manuscript.record?.segments?.length) && <SegmentEditor resolvedTaskId={resolvedCandidate} onResolve={resolveCandidate} record={manuscript.record!} task={task} disabled={Boolean(occupied || busy || connecting)} text={manuscript.segmentText} edit={manuscript.editSegment} retry={id=>void retrySegment(id)} clear={()=>void clearAudio()} apply={async(id,value)=>{if(!(await manuscript.flush())) throw new Error('请先保存当前编辑'); manuscript.editSegment(id,value); if(!(await manuscript.flush())) throw new Error('保存候选失败');}}/>}
           {manuscript.record && !manuscript.record.segments?.length && <p className="field-hint">此文稿没有时间戳，重新导入原视频可获得分段回听与重新识别功能。</p>}
           <div hidden={Boolean(manuscript.record?.segments?.length) || (manuscriptView !== 'edit' && Boolean(manuscript.record))} className={`editor-surface ${!text ? 'is-empty' : ''}`}>
             <div className="line-gutter" ref={gutter} aria-hidden="true">{Array.from({ length: lines }, (_, i) => <span key={i}>{String(i + 1).padStart(2, '0')}</span>)}</div>
-            <textarea aria-label="文稿全文" spellCheck={false} readOnly={!session || active || busy || connecting || manuscript.loading || (!manuscript.record && !(task?.status === 'completed' && !task.history_id))} value={text} maxLength={200000} onBlur={() => void manuscript.flush()} onChange={event => { manuscript.edit(event.target.value); setNotice(''); }} onScroll={event => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }} />
+            <textarea aria-label="文稿全文" spellCheck={false} readOnly={!session || occupied || busy || connecting || manuscript.loading || (!manuscript.record && !(task?.status === 'completed' && !task.history_id))} value={text} maxLength={200000} onBlur={() => void manuscript.flush()} onChange={event => { manuscript.edit(event.target.value); setNotice(''); }} onScroll={event => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }} />
             {!text && <div className="empty-manuscript"><span className="paper-icon" aria-hidden="true"><i /><i /><i /></span><h3>{active ? '正在听，正在记录' : '文稿将在这里展开'}</h3><p>{active ? '处理阶段会实时显示，请稍候。' : '在左侧导入视频，开始你的第一份文稿。'}</p></div>}
           </div>
           <div className="editor-footer"><span>{text ? `${text.length.toLocaleString('zh-CN')} 字符` : '等待素材'}{dirty.current && text ? ' · 已编辑' : ''}</span><span aria-live="polite">{notice || (active || busy ? '提取完成后，可校对和编辑全文' : '可编辑全文 · 复制与导出保留你的修改')}</span></div>

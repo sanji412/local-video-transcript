@@ -327,3 +327,33 @@ def test_retained_audio_survives_restart_but_orphans_and_temp_files_do_not(runne
         assert [p.name for p in directory.iterdir()] == [before["id"] + ".wav"]
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("kind", ["task", "retry"])
+def test_invalid_worker_efficiency_fails_without_exposing_nonfinite_json(runner, kind):
+    runner._command_builder = lambda payload: [
+        sys.executable,
+        "-c",
+        'print(\'{"type":"result","text":"bad","source":"transcription","recognition_seconds":Infinity}\')',
+    ]
+    if kind == "task":
+        task = runner.reserve_task()
+        runner.start_reserved(task["id"], "file", "ok")
+    else:
+        runner.history.create(
+            id="base",
+            source_type="file",
+            source_ref="a.mp4",
+            text="原稿",
+            source="transcription",
+            mode="fast",
+            segments=[dict(id=0, start=0, end=1, text="原稿")],
+        )
+        audio = runner.history.audio_path("base")
+        audio.parent.mkdir()
+        audio.write_bytes(b"audio")
+        task = runner.retry_segment("base", 0, 0, "fast")
+    result = wait_for(runner, task["id"], "failed")
+    assert result.get("recognition_seconds") is None
+    if kind == "retry":
+        assert runner.history.get("base")["edited_text"] == "原稿"

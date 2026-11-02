@@ -22,9 +22,34 @@ Mode = Literal["fast", "accurate"]
 
 
 class LinkInput(BaseModel):
+    force: bool = False
     mode: Mode = "fast"
     retain_audio: bool = False
     share_text: str = Field(min_length=1, max_length=10000)
+
+
+class BatchPreviewInput(BaseModel):
+    share_text: str = Field(min_length=1, max_length=200000)
+
+
+class BatchLinkInput(BaseModel):
+    share_text: str = Field(min_length=1, max_length=200000)
+    force: bool = False
+
+
+class BatchInput(BaseModel):
+    items: list[BatchLinkInput] = Field(min_length=1, max_length=20)
+    mode: Mode = "fast"
+    retain_audio: bool = False
+
+
+class BatchAction(BaseModel):
+    action: Literal["pause", "resume", "cancel", "retry_failed"]
+
+
+class BatchItemAction(BaseModel):
+    action: Literal["cancel", "retry"]
+    force: bool = False
 
 
 class HistoryPatch(BaseModel):
@@ -107,6 +132,8 @@ class LocalAccessMiddleware:
         limit = self.max_bytes + 1024 * 1024 if scope["path"] == "/api/tasks/file" else 32 * 1024
         if scope["path"].startswith("/api/history/") and scope["method"] == "PATCH":
             limit = 2500000  # bounded JSON, including escaped Unicode for 200000 characters
+        if scope["path"] == "/api/batches" or scope["path"].startswith("/api/batches/"):
+            limit = 2500000
         if content_length > limit or content_length < 0:
             return await JSONResponse({"detail": "文件或输入内容过大，请使用较小的视频。"}, status_code=413)(
                 scope, receive, send
@@ -194,6 +221,7 @@ def create_app(settings=None, manager=None):
             "models": {mode: m.model_state(mode) for mode in ("fast", "accurate")},
             "dependencies": dependencies(),
             "active_task": m.current_task(),
+            "batch": m.batches.current(),
         }
 
     @app.get("/api/model")
@@ -213,6 +241,12 @@ def create_app(settings=None, manager=None):
             url = extract_link(body.share_text)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        duplicate = m.history.find_duplicate(url)
+        if duplicate and not body.force:
+            return JSONResponse(
+                {"detail": "此视频已有文稿，可打开已有文稿或重新提取。", "duplicate": duplicate},
+                status_code=409,
+            )
         ensure_ready(m, body.mode)
         task = m.reserve_task(
             body.mode,
@@ -220,6 +254,7 @@ def create_app(settings=None, manager=None):
             url,
             source_title=extract_share_title(body.share_text),
             retain_audio=body.retain_audio,
+            force=body.force,
         )
         try:
             m.start_reserved(task["id"], "link", url)
@@ -263,6 +298,40 @@ def create_app(settings=None, manager=None):
                 raise
         finally:
             await file.close()
+
+    def batch_call(operation):
+        try:
+            return operation()
+        except KeyError:
+            raise HTTPException(404, "批次或队列项目不存在。") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.post("/api/batches/preview")
+    def batch_preview(body: BatchPreviewInput, request: Request):
+        return batch_call(lambda: get_manager(request).batches.preview(body.share_text))
+
+    @app.post("/api/batches", status_code=202)
+    def batch_start(body: BatchInput, request: Request):
+        m = get_manager(request)
+        ensure_ready(m, body.mode)
+        return batch_call(
+            lambda: m.batches.start([item.model_dump() for item in body.items], body.mode, body.retain_audio)
+        )
+
+    @app.get("/api/batches/current")
+    def batch_current(request: Request):
+        return {"batch": get_manager(request).batches.current()}
+
+    @app.post("/api/batches/{batch_id}/actions")
+    def batch_action(batch_id: str, body: BatchAction, request: Request):
+        return batch_call(lambda: get_manager(request).batches.action(batch_id, body.action))
+
+    @app.post("/api/batches/{batch_id}/items/{item_id}/actions")
+    def batch_item_action(batch_id: str, item_id: str, body: BatchItemAction, request: Request):
+        return batch_call(
+            lambda: get_manager(request).batches.action(batch_id, body.action, item_id, body.force)
+        )
 
     @app.get("/api/tasks/{task_id}")
     def task_state(task_id: str, request: Request):

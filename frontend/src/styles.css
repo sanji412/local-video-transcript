@@ -156,3 +156,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .segment-editor audio { width: 100%; }
 .complete-surface textarea { min-height: 520px; color: #25334e; background: #fff; }
 .segment-row .draft-banner .decline-candidate { margin-left: 8px; border-color: transparent; background: transparent; color: #65718a; }
+
+.batch-input textarea { width: 100%; min-height: 150px; resize: vertical; }
+.batch-preview, .queue-panel ol { padding-left: 22px; margin: 12px 0; }
+.batch-preview li, .queue-panel li { padding: 12px 0; border-bottom: 1px solid var(--border, #e5e2dc); overflow-wrap: anywhere; }
+.batch-preview strong, .batch-preview span, .batch-preview label, .queue-panel li strong { display: block; }
+.batch-preview span, .queue-status { font-size: 12px; color: #68645b; margin: 5px 0; }
+.queue-panel { margin-top: 18px; padding: 22px; }
+.queue-panel h2 { margin: 0 0 10px; font-size: 17px; }
+.queue-panel button, .batch-input button { margin: 6px 6px 0 0; }
+.queue-panel button { border: 1px solid #d9e2ed; background: white; padding: 7px 10px; border-radius: 6px; color: #3155b9; font-size: 11px; }
+.queue-panel button:hover:enabled { background: #f6f8ff; border-color: #809ee6; }
+.queue-panel button:disabled { color: #9cabc0; border-color: #e6ebf1; }
+.queue-actions { display:flex; flex-wrap:wrap; gap:6px; }
+.efficiency { display:flex; flex-wrap:wrap; gap:6px 16px; padding:10px 0; font-size:12px; color:#716c61; line-height:1.6; }
+.input-tabs button { min-width:0; }

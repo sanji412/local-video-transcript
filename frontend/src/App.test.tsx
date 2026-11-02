@@ -14,7 +14,7 @@ beforeEach(() => {
   route = () => ready;
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     const url = String(input); requests.push({ url, init });
-    const value = url === '/api/session' ? session : url.startsWith('/api/history?') ? {items:[]} : await route(url, init);
+    const value = url === '/api/session' ? session : url === '/api/batches/current' ? {batch:null} : url.startsWith('/api/history?') ? {items:[]} : await route(url, init);
     return value instanceof Response ? value : new Response(JSON.stringify(value));
   }));
 });

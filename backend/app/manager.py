@@ -62,6 +62,8 @@ class JobManager:
             self._lockfile.close()
             raise RuntimeError("已有一个本地服务正在运行，请使用已打开的工作台。") from None
         self._lock = threading.RLock()
+        self._batch_owner = None
+        self._started_at = None
         self._task = None
         self._process = None
         self._thread = None
@@ -78,6 +80,10 @@ class JobManager:
         for entry in settings.tasks_dir.iterdir():
             if entry.name.startswith(("task-", "model-")):
                 self._remove_directory(entry)
+
+        from .batches import BatchController
+
+        self.batches = BatchController(self)
 
     @staticmethod
     def _remove_directory(path):
@@ -99,13 +105,19 @@ class JobManager:
 
     def current_task(self):
         with self._lock:
-            return dict(self._task) if self._task else None
+            return self._task_snapshot() if self._task else None
 
     def get_task(self, task_id: str) -> dict:
         with self._lock:
             if not self._task or self._task["id"] != task_id:
                 raise KeyError(task_id)
-            return dict(self._task)
+            return self._task_snapshot()
+
+    def _task_snapshot(self):
+        result = dict(self._task)
+        if result["status"] == "running" and self._started_at is not None:
+            result["total_seconds"] = max(0, time.monotonic() - self._started_at)
+        return result
 
     def is_running(self, task_id: str) -> bool:
         with self._lock:
@@ -116,19 +128,32 @@ class JobManager:
                 and task_id not in self._cancelled
             )
 
-    def _ensure_available(self):
+    def _ensure_available(self, batch_id=None):
+        if self._batch_owner is not None and batch_id != self._batch_owner:
+            raise BusyError("批量队列正在占用处理器，请先暂停或停止队列。")
         if self._closed:
             raise BusyError("服务正在关闭，请重新启动。")
         if (self._task and self._task["status"] == "running") or self._process is not None:
             raise BusyError("已有任务正在处理，请等待完成或取消当前任务。")
 
     def reserve_task(
-        self, mode="fast", source_type=None, source_ref=None, *, source_title=None, retain_audio=False
+        self,
+        mode="fast",
+        source_type=None,
+        source_ref=None,
+        *,
+        source_title=None,
+        retain_audio=False,
+        force=False,
+        batch_id=None,
     ) -> dict:
         with self._lock:
-            self._ensure_available()
+            self._ensure_available(batch_id)
             self.settings.model_path(mode)
-            self.expire_audio()
+            if batch_id is None:
+                self.expire_audio()
+            self._force = force
+            self._started_at = time.monotonic()
             self._retain_audio = retain_audio
             self._source_info = (source_type, source_ref)
             self._source_title = source_title
@@ -137,6 +162,10 @@ class JobManager:
             self._task = {
                 "id": task_id,
                 "kind": "task",
+                "batch_id": batch_id,
+                "total_seconds": 0,
+                "recognition_seconds": None,
+                "media_duration_seconds": None,
                 "mode": mode,
                 "status": "running",
                 "stage": "preparing",
@@ -162,6 +191,8 @@ class JobManager:
                     "input": input_value,
                     "work_dir": str(self.task_dir(task_id)),
                     "model_dir": str(self.settings.model_path(mode)),
+                    "known_video_ids": self.history.known_video_ids(),
+                    "force": self._force,
                     "max_bytes": self.settings.max_upload_bytes,
                     "max_duration": self.settings.max_duration,
                 },
@@ -259,6 +290,11 @@ class JobManager:
                                         "detail": event.get("detail", "正在准备模型"),
                                         "progress": event.get("progress"),
                                     }
+                                elif event_type == "duplicate":
+                                    existing = self.history.find_duplicate(video_id=event["video_id"])
+                                    if existing is None:
+                                        raise ValueError("Unknown duplicate")
+                                    result = {"duplicate": existing["id"]}
                                 elif event_type == "result":
                                     if (
                                         not isinstance(event.get("text"), str)
@@ -267,6 +303,12 @@ class JobManager:
                                     ):
                                         raise ValueError("Invalid transcription result")
                                     result = {"text": event["text"], "source": event["source"]}
+                                    for name in ("video_id", "recognition_seconds", "media_duration_seconds"):
+                                        result[name] = event.get(name)
+                                    self.history.validate_efficiency(
+                                        recognition_seconds=result["recognition_seconds"],
+                                        media_duration_seconds=result["media_duration_seconds"],
+                                    )
                                     if payload["kind"] == "task":
                                         segments = self.history.validate_segments(event.get("segments", []))
                                         if segments and event["text"] != "\n".join(
@@ -290,7 +332,14 @@ class JobManager:
             with self._lock:
                 cache = temporary = None
                 cancelled = task_id and (task_id in self._cancelled or self._closed)
-                if task_id and payload["kind"] == "task" and result and not error and not cancelled:
+                if (
+                    task_id
+                    and payload["kind"] == "task"
+                    and result
+                    and not result.get("duplicate")
+                    and not error
+                    and not cancelled
+                ):
                     try:
                         audio = Path(payload["work_dir"]) / "audio.wav"
                         if audio.is_file() and not audio.is_symlink():
@@ -310,6 +359,7 @@ class JobManager:
                 if error:
                     self._discard_audio(cache, temporary)
                 if task_id:
+                    self._task["total_seconds"] = max(0, time.monotonic() - self._started_at)
                     if task_id in self._cancelled or self._closed:
                         self._task.update(status="cancelled", stage="cancelled", detail="任务已取消")
                     elif error or not result:
@@ -318,6 +368,13 @@ class JobManager:
                             stage="failed",
                             detail="提取失败",
                             error=error or "没有获得有效文案，请检查视频是否包含清晰语音。",
+                        )
+                    elif result.get("duplicate"):
+                        self._task.update(
+                            status="completed",
+                            stage="duplicate",
+                            detail="已跳过重复视频",
+                            history_id=result["duplicate"],
                         )
                     elif payload["kind"] == "retry":
                         self._task.update(
@@ -335,6 +392,10 @@ class JobManager:
                                 title=self._source_title,
                                 segments=result.get("segments", []),
                                 audio_retained=self._retain_audio,
+                                video_id=result.get("video_id"),
+                                recognition_seconds=result.get("recognition_seconds"),
+                                media_duration_seconds=result.get("media_duration_seconds"),
+                                total_seconds=self._task["total_seconds"],
                             )
                         except (OSError, sqlite3.Error, ValueError):
                             self._discard_audio(cache, temporary)
@@ -440,7 +501,11 @@ class JobManager:
             work.mkdir()
             try:
                 shutil.copyfile(self.history.audio_path(record_id), work / "source.wav")
+                self._started_at = time.monotonic()
                 self._task = dict(
+                    total_seconds=0,
+                    recognition_seconds=None,
+                    media_duration_seconds=None,
                     id=task_id,
                     kind="retry",
                     history_id=record_id,
@@ -484,5 +549,7 @@ class JobManager:
             self._thread.join(timeout=6)
         elif task and task["status"] == "running":
             self._remove_directory(self.task_dir(task["id"]))
+        if hasattr(self, "batches"):
+            self.batches.close()
         fcntl.flock(self._lockfile, fcntl.LOCK_UN)
         self._lockfile.close()

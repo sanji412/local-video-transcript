@@ -177,3 +177,54 @@ def test_segment_compare_and_swap_preserves_whole_record_under_concurrent_edits(
     assert after["revision"] == 1 and after["original_text"] == before["original_text"]
     assert [s["original_text"] for s in after["segments"]] == ["甲", "乙"]
     assert after["edited_text"] in ["改\n乙", "甲\n改"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("recognition_seconds", -1),
+        ("recognition_seconds", float("nan")),
+        ("recognition_seconds", float("inf")),
+        ("recognition_seconds", True),
+        ("total_seconds", -1),
+        ("media_duration_seconds", 0),
+        ("media_duration_seconds", 1801),
+    ],
+)
+def test_efficiency_metadata_rejects_invalid_values(tmp_path, field, value):
+    store = HistoryStore(tmp_path / "history.sqlite3")
+    with pytest.raises(ValueError):
+        store.create(
+            id="invalid",
+            source_type="file",
+            source_ref="a.mp4",
+            text="正文",
+            source="transcription",
+            mode="fast",
+            **{field: value},
+        )
+    assert store.list() == []
+
+
+def test_measured_efficiency_and_video_identity_survive_reopen_without_changing_text(tmp_path):
+    path = tmp_path / "history.sqlite3"
+    store = HistoryStore(path)
+    store.create(
+        id="measured",
+        source_type="link",
+        source_ref="https://v.douyin.com/AbC/",
+        text="原稿",
+        source="transcription",
+        mode="accurate",
+        video_id="123",
+        recognition_seconds=12.5,
+        total_seconds=18.3,
+        media_duration_seconds=60,
+    )
+    store.update("measured", revision=0, edited_text="校对稿")
+    reopened = HistoryStore(path)
+    record = reopened.get("measured")
+    assert record["recognition_seconds"] == 12.5 and record["total_seconds"] == 18.3
+    assert reopened.find_duplicate(video_id="123")["id"] == "measured"
+    assert reopened.find_duplicate("https://v.douyin.com/AbC/?track=1")["id"] == "measured"
+    assert record["original_text"] == "原稿" and record["edited_text"] == "校对稿"
