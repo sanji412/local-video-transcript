@@ -2,6 +2,8 @@
 
 在本机提取抖音口播、讲解视频的完整讲述稿，支持链接或 MP4 导入。使用 React + FastAPI + MLX Whisper，不调用在线转写服务。
 
+当前产品迭代为 **0.4.0**；各次新增功能、修复和验证结果见 [更新日志](CHANGELOG.md)。
+
 ## 启动
 
 适用于 Apple 芯片 Mac。需要 macOS 14 或更新版本、uv、Node.js 22.12 或更新版本和 FFmpeg。通过 Homebrew 安装缺少的工具：
