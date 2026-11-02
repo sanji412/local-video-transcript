@@ -280,3 +280,88 @@ def test_history_remains_available_without_model_and_storage_errors_are_actionab
     assert response.status_code == 503
     assert "磁盘" in response.json()["detail"]
     assert "disk I/O" not in response.text
+
+
+def test_segment_audio_range_and_clear_keep_the_manuscript(client):
+    c, manager = client
+    record = manager.history.create(
+        id="timed",
+        source_type="file",
+        source_ref="a.mp4",
+        text="甲\n乙",
+        source="transcription",
+        mode="accurate",
+        audio_retained=True,
+        segments=[dict(id=0, start=0, end=1, text="甲"), dict(id=1, start=1, end=2, text="乙")],
+    )
+    path = manager.history.audio_path("timed")
+    path.parent.mkdir()
+    path.write_bytes(b"RIFFtestaudio")
+    response = c.get("/api/history/timed/audio", headers={"Range": "bytes=0-3"})
+    assert response.status_code == 206 and response.content == b"RIFF"
+    assert response.headers["content-range"] == "bytes 0-3/13"
+    assert c.delete("/api/history/timed/audio").status_code == 403
+    cleared = c.delete("/api/history/timed/audio", headers=auth(c))
+    assert cleared.status_code == 200 and cleared.json()["audio_available"] is False
+    assert c.get("/api/history/timed/audio").status_code == 404
+    assert cleared.json()["original_text"] == record["original_text"]
+    assert cleared.json()["segments"] == record["segments"]
+
+
+def test_segment_save_retry_validation_and_exclusion(client, monkeypatch):
+    c, manager = client
+    manager.history.create(
+        id="timed",
+        source_type="file",
+        source_ref="a.mp4",
+        text="甲\n乙",
+        source="transcription",
+        mode="accurate",
+        segments=[dict(id=0, start=0, end=1, text="甲"), dict(id=1, start=1, end=2, text="乙")],
+    )
+    changed = c.patch(
+        "/api/history/timed/segments/0", headers=auth(c), json={"revision": 0, "text": "校对甲"}
+    )
+    assert changed.status_code == 200 and changed.json()["edited_text"] == "校对甲\n乙"
+    assert changed.json()["segments"][1]["text"] == "乙"
+    assert (
+        c.patch(
+            "/api/history/timed/segments/0", headers=auth(c), json={"revision": 0, "text": "旧改"}
+        ).status_code
+        == 409
+    )
+    assert (
+        c.patch(
+            "/api/history/timed/segments/0", headers=auth(c), json={"revision": 1, "text": None}
+        ).status_code
+        == 422
+    )
+    assert (
+        c.post(
+            "/api/history/timed/segments/0/recognize",
+            headers=auth(c),
+            json={"revision": 1, "mode": "accurate"},
+        ).status_code
+        == 404
+    )
+    audio = manager.history.audio_path("timed")
+    audio.parent.mkdir()
+    audio.write_bytes(b"cache")
+    payloads = []
+    monkeypatch.setattr(manager, "_spawn", lambda payload, ident: payloads.append(payload))
+    retry = c.post(
+        "/api/history/timed/segments/0/recognize", headers=auth(c), json={"revision": 1, "mode": "accurate"}
+    )
+    assert retry.status_code == 202 and retry.json()["kind"] == "retry"
+    assert retry.json()["history_id"] == "timed" and retry.json()["segment_id"] == 0
+    assert payloads[0]["kind"] == "retry" and payloads[0]["start"] == 0
+    assert c.delete("/api/history/timed", headers=auth(c)).status_code == 409
+    assert c.delete("/api/history/timed/audio", headers=auth(c)).status_code == 409
+    assert (
+        c.post(
+            "/api/tasks/link", headers=auth(c), json={"share_text": "https://v.douyin.com/abc/"}
+        ).status_code
+        == 409
+    )
+    assert c.post(f"/api/tasks/{retry.json()['id']}/cancel", headers=auth(c)).status_code == 200
+    assert c.get("/api/history/timed").json()["edited_text"] == "校对甲\n乙"

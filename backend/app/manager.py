@@ -288,6 +288,27 @@ class JobManager:
             stop_process_group(process)
             process.stdout.close()
             with self._lock:
+                cache = temporary = None
+                cancelled = task_id and (task_id in self._cancelled or self._closed)
+                if task_id and payload["kind"] == "task" and result and not error and not cancelled:
+                    try:
+                        audio = Path(payload["work_dir"]) / "audio.wav"
+                        if audio.is_file() and not audio.is_symlink():
+                            cache = self.history.audio_path(task_id)
+                            temporary = cache.with_suffix(".tmp")
+                            cache.parent.mkdir(exist_ok=True)
+                            shutil.copyfile(audio, temporary)
+                            os.replace(temporary, cache)
+                        elif result.get("segments"):
+                            raise ValueError("Missing segment audio")
+                    except (OSError, KeyError, ValueError):
+                        error = "回听音频保存失败，请检查磁盘空间和权限后重试。"
+                try:
+                    self._remove_directory(Path(payload["work_dir"]))
+                except OSError:
+                    error = "临时文件清理失败，请检查磁盘权限后重新启动工具。"
+                if error:
+                    self._discard_audio(cache, temporary)
                 if task_id:
                     if task_id in self._cancelled or self._closed:
                         self._task.update(status="cancelled", stage="cancelled", detail="任务已取消")
@@ -303,15 +324,7 @@ class JobManager:
                             status="completed", stage="completed", detail="局部识别完成", **result
                         )
                     else:
-                        cache = None
                         try:
-                            audio = Path(payload["work_dir"]) / "audio.wav"
-                            if audio.is_file() and not audio.is_symlink():
-                                cache = self.history.audio_path(task_id)
-                                cache.parent.mkdir(exist_ok=True)
-                                temporary = cache.with_suffix(".tmp")
-                                shutil.copyfile(audio, temporary)
-                                os.replace(temporary, cache)
                             record = self.history.create(
                                 id=task_id,
                                 source_type=self._source_info[0],
@@ -324,8 +337,7 @@ class JobManager:
                                 audio_retained=self._retain_audio,
                             )
                         except (OSError, sqlite3.Error, ValueError):
-                            if cache:
-                                cache.unlink(missing_ok=True)
+                            self._discard_audio(cache, temporary)
                             self._task.update(
                                 status="failed",
                                 stage="failed",
@@ -344,9 +356,19 @@ class JobManager:
                     self._model = {"status": "error", "detail": error, "progress": None}
                 else:
                     self._model = None
-                self._remove_directory(Path(payload["work_dir"]))
                 if self._process is process:
                     self._process = None
+
+    @staticmethod
+    def _discard_audio(*paths):
+        for path in paths:
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    # Startup retries orphan cleanup; a disk error must not keep
+                    # the dead worker marked active or publish a false success.
+                    pass
 
     def fail_reserved(self, task_id, detail):
         with self._lock:
@@ -384,13 +406,18 @@ class JobManager:
                 self._task = None
 
     def expire_audio(self):
+        directory = self.settings.data_dir / "audio"
+        if not directory.is_dir() or directory.is_symlink():
+            return
+        retained = set()
         for item in self.history.list():
             record = self.history.get(item["id"])
-            if not record["audio_retained"]:
-                try:
-                    self.history.audio_path(record["id"]).unlink(missing_ok=True)
-                except KeyError:
-                    pass
+            if record["audio_retained"]:
+                retained.add(record["id"] + ".wav")
+        for path in directory.iterdir():
+            if path.suffix == ".tmp" or (path.suffix == ".wav" and path.name not in retained):
+                if path.is_symlink() or path.is_file():
+                    path.unlink(missing_ok=True)
 
     def clear_audio(self, record_id):
         with self._lock:

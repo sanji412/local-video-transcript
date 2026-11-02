@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from app.config import Settings
@@ -22,11 +23,15 @@ def wait_for(manager, task_id, status, timeout=6):
 def runner(tmp_path):
     worker = tmp_path / "fake_worker.py"
     worker.write_text("""import json,sys,time,subprocess,os
+from pathlib import Path
 p=json.load(open(sys.argv[1]))
 def emit(e): print(json.dumps(e), flush=True)
 emit({'type':'stage','stage':'transcribing','detail':'正在本地转写'})
 if p['input']=='fail':
     emit({'type':'error','detail':'无法识别有效语音'})
+elif p['input']=='timed':
+    Path(p['work_dir'],'audio.wav').write_bytes(b'cached PCM audio')
+    emit({'type':'result','text':'完整文案。','source':'transcription','segments':[{'id':0,'start':0,'end':1,'text':'完整文案。'}]})
 elif p['input']=='hang':
     child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])
     open(p['work_dir']+'/child.pid','w').write(str(child.pid))
@@ -269,3 +274,56 @@ def test_clear_audio_blocked_while_reserved(runner):
     runner.reserve_task()
     with pytest.raises(BusyError):
         runner.clear_audio("missing")
+
+
+def test_cleanup_failure_never_publishes_completion_or_blocks_future_jobs(runner, monkeypatch):
+    task = runner.reserve_task()
+    remove = runner._remove_directory
+
+    def fail(path):
+        if path == runner.task_dir(task["id"]):
+            raise OSError("cleanup denied")
+        remove(path)
+
+    monkeypatch.setattr(runner, "_remove_directory", fail)
+    runner.start_reserved(task["id"], "file", "timed")
+    result = wait_for(runner, task["id"], "failed")
+    assert "清理" in result["error"]
+    assert runner._process is None and runner.history.list() == []
+    assert not runner.history.audio_path(task["id"]).exists()
+    monkeypatch.setattr(runner, "_remove_directory", remove)
+    remove(runner.task_dir(task["id"]))
+    assert runner.reserve_task()["status"] == "running"
+
+
+def test_partial_audio_publication_rolls_back_all_cache_files(runner, monkeypatch):
+    def copy_then_fail(source, target):
+        Path(target).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.manager.shutil.copyfile", copy_then_fail)
+    task = runner.reserve_task(retain_audio=True)
+    runner.start_reserved(task["id"], "file", "timed")
+    wait_for(runner, task["id"], "failed")
+    assert runner.history.list() == []
+    assert list((runner.settings.data_dir / "audio").iterdir()) == []
+    assert not runner.task_dir(task["id"]).exists()
+
+
+def test_retained_audio_survives_restart_but_orphans_and_temp_files_do_not(runner):
+    task = runner.reserve_task(retain_audio=True)
+    runner.start_reserved(task["id"], "file", "timed")
+    completed = wait_for(runner, task["id"], "completed")
+    before = runner.history.get(completed["history_id"])
+    assert before["segments"][0]["original_text"] == "完整文案。"
+    assert before["audio_available"] and before["audio_retained"]
+    directory = runner.settings.data_dir / "audio"
+    (directory / "abandoned.wav").write_bytes(b"orphan")
+    (directory / "incomplete.tmp").write_bytes(b"partial")
+    runner.close()
+    reopened = JobManager(runner.settings)
+    try:
+        assert reopened.history.get(before["id"]) == before
+        assert [p.name for p in directory.iterdir()] == [before["id"] + ".wav"]
+    finally:
+        reopened.close()
