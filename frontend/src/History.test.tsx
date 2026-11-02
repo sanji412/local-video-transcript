@@ -12,6 +12,24 @@ else if(url==='/api/tasks/link'){starts++;result={id:'job',status:'running',stag
 return new Response(JSON.stringify(result));}));});
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 async function start(delay=15){render(<App autosaveDelay={delay} pollInterval={10000}/>);await waitFor(()=>expect(screen.getByLabelText('文稿全文')).toHaveValue('已保存的校对稿'));return screen.getByLabelText('文稿全文');}
+
+it('keeps a recovered segment candidate available after visiting another manuscript',async()=>{
+ records=records.map(r=>({...r,edited_text:r.id==='a'?'甲':'乙',segments:[{id:0,start:0,end:1,text:r.id==='a'?'甲':'乙',original_text:'原稿'}]}));
+ const previous=fetch;
+ vi.stubGlobal('fetch',vi.fn((input:string,init?:RequestInit)=>{
+  if(String(input)==='/api/session')return Promise.resolve(new Response(JSON.stringify({token:'secret',model:ready,models:{fast:ready,accurate:ready},dependencies:{ffmpeg:true,ffprobe:true},active_task:{id:'retry',kind:'retry',status:'completed',stage:'completed',detail:'局部完成',history_id:'a',segment_id:0,text:'恢复的识别候选',source:'transcription',error:null}})));
+  return previous(input,init);
+ }));
+ render(<App/>);
+ await screen.findByText('恢复的识别候选');
+ fireEvent.click(await screen.findByRole('button',{name:/第二份文稿/}));
+ await waitFor(()=>expect(screen.getByLabelText('片段 1')).toHaveValue('乙'));
+ expect(screen.queryByText('恢复的识别候选')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:/第一份文稿/}));
+ await screen.findByText('恢复的识别候选');
+ expect(screen.getByLabelText('片段 1')).toHaveValue('甲');
+ expect(screen.getByRole('button',{name:'采用识别结果'})).toBeEnabled();
+});
 it('restores edited text and immutable original',async()=>{const editor=await start();fireEvent.change(editor,{target:{value:'新校对稿'}});fireEvent.click(screen.getByRole('button',{name:'原始转写'}));expect(screen.getByLabelText('原始转写全文')).toHaveValue('不可变原稿');expect(screen.getByLabelText('原始转写全文')).toHaveAttribute('readonly');await waitFor(()=>expect(patches[0]).toMatchObject({revision:1,edited_text:'新校对稿'}));await screen.findByText('已保存');});
 it('serializes latest edits made during a pending PATCH',async()=>{const editor=await start();hold=true;fireEvent.change(editor,{target:{value:'第一改'}});await waitFor(()=>expect(patches).toHaveLength(1));fireEvent.change(editor,{target:{value:'最新修改'}});expect(screen.queryByText('已保存')).not.toBeInTheDocument();hold=false;await act(async()=>pending());await waitFor(()=>expect(patches).toHaveLength(2));expect(patches[1]).toMatchObject({revision:2,edited_text:'最新修改'});await screen.findByText('已保存');});
 it.each([503,409])('preserves draft on %s and blocks switching and new tasks',async(code)=>{const editor=await start(10000);fail=code;fireEvent.change(editor,{target:{value:'不能丢的稿'}});fireEvent.click(screen.getByRole('button',{name:/第二份文稿/}));await screen.findAllByText(/保存失败/);expect(editor).toHaveValue('不能丢的稿');fireEvent.change(screen.getByLabelText('抖音分享链接'),{target:{value:'https://v.douyin.com/a/'}});fireEvent.click(screen.getByRole('button',{name:'开始提取'}));await screen.findAllByText(/保存失败/);expect(starts).toBe(0);expect(editor).toHaveValue('不能丢的稿');fail=0;if(code===409)expect(screen.getByRole('button',{name:'重新载入最新稿'})).toBeVisible();else{fireEvent.click(screen.getByRole('button',{name:'重试保存'}));await screen.findByText('已保存');}});

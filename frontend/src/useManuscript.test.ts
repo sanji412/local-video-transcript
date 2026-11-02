@@ -41,3 +41,32 @@ it('saves only changed segments with sequential revisions and keeps full edited 
  act(()=>result.current.editSegment(0,'修改'));await act(async()=>{await result.current.flush();});
  expect(calls).toEqual(['/api/history/a/segments/0']);expect(result.current.text).toBe('修改\n乙');expect(result.current.record?.segments?.[1].text).toBe('乙');
 });
+
+it('serializes different segment drafts and newer keystrokes while a save is pending',async()=>{
+ let record={id:'a',revision:0,edited_text:'甲\n乙',original_text:'甲\n乙',segments:[
+  {id:0,start:0,end:1,original_text:'甲',text:'甲'}, {id:1,start:1,end:2,original_text:'乙',text:'乙'}]};
+ let finish!:(response:Response)=>void;
+ const writes:{id:number;revision:number;text:string}[]=[];
+ vi.stubGlobal('fetch',vi.fn((path:string,init?:RequestInit)=>{
+  if(init?.method!=='PATCH')return Promise.resolve(new Response(JSON.stringify(record)));
+  const body=JSON.parse(init.body as string),id=Number(path.split('/').pop());
+  writes.push({id,...body});expect(body.revision).toBe(record.revision);
+  record={...record,revision:record.revision+1,segments:record.segments.map(s=>s.id===id?{...s,text:body.text}:s)};
+  record.edited_text=record.segments.map(s=>s.text).join('\n');
+  return writes.length===1?new Promise<Response>(resolve=>finish=resolve):Promise.resolve(new Response(JSON.stringify(record)));
+ }));
+ const {result}=renderHook(()=>useManuscript('secret',10000));
+ await act(async()=>{await result.current.open('a');});
+ act(()=>result.current.editSegment(0,'第一改'));
+ let saving!:Promise<boolean>;
+ act(()=>{saving=result.current.flush();});
+ await waitFor(()=>expect(writes).toHaveLength(1));
+ const firstResponse={...record,segments:record.segments.map(s=>({...s}))};
+ act(()=>{result.current.editSegment(1,'第二段修改');result.current.editSegment(0,'第一段最新');});
+ await act(async()=>{finish(new Response(JSON.stringify(firstResponse)));await saving;});
+ expect(writes).toEqual([{id:0,revision:0,text:'第一改'},{id:0,revision:1,text:'第一段最新'},{id:1,revision:2,text:'第二段修改'}]);
+ expect(result.current.text).toBe('第一段最新\n第二段修改');
+ expect(result.current.record?.edited_text).toBe(result.current.text);
+ expect(result.current.record?.original_text).toBe('甲\n乙');
+ expect(result.current.dirty.current).toBe(false);
+});

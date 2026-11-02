@@ -306,3 +306,15 @@ describe('本地文案工作台', () => {
   });
 
 });
+
+it('keeps failed local recognition away from full-video retry routing', async () => {
+ session.active_task = task({kind:'retry',status:'failed',history_id:'a',segment_id:0});
+ route = url => url.endsWith('/recognize') ? task({kind:'retry',status:'failed',history_id:'a',segment_id:0}) : url === '/api/history/a' ? {id:'a',title:'文稿',revision:1,edited_text:'稿',original_text:'稿',audio_available:true,segments:[{id:0,start:0,end:1,text:'稿',original_text:'稿'}]} : ready;
+ const user=userEvent.setup();render(<App/>);
+ await screen.findByLabelText('片段 1');
+ await user.type(screen.getByLabelText('抖音分享链接'),'https://v.douyin.com/abc/');
+ expect(screen.queryByRole('button',{name:'重试提取'})).not.toBeInTheDocument();
+ await user.click(screen.getByRole('button',{name:'重新识别此段'}));
+ expect(requests.some(r=>r.url==='/api/history/a/segments/0/recognize'&&r.init?.method==='POST')).toBe(true);
+ expect(requests.some(r=>r.url==='/api/tasks/link')).toBe(false);
+});

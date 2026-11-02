@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
@@ -23,6 +23,7 @@ Mode = Literal["fast", "accurate"]
 
 class LinkInput(BaseModel):
     mode: Mode = "fast"
+    retain_audio: bool = False
     share_text: str = Field(min_length=1, max_length=10000)
 
 
@@ -38,6 +39,18 @@ class HistoryPatch(BaseModel):
         if value is None:
             raise ValueError("保存字段不能为 null")
         return value
+
+
+class SegmentPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0, strict=True)
+    text: str = Field(max_length=10000)
+
+
+class RetryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=0, strict=True)
+    mode: Mode = "fast"
 
 
 class BodyLimitExceeded(HTTPException):
@@ -201,7 +214,13 @@ def create_app(settings=None, manager=None):
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         ensure_ready(m, body.mode)
-        task = m.reserve_task(body.mode, "link", url, source_title=extract_share_title(body.share_text))
+        task = m.reserve_task(
+            body.mode,
+            "link",
+            url,
+            source_title=extract_share_title(body.share_text),
+            retain_audio=body.retain_audio,
+        )
         try:
             m.start_reserved(task["id"], "link", url)
         except Exception:
@@ -210,14 +229,16 @@ def create_app(settings=None, manager=None):
         return m.get_task(task["id"])
 
     @app.post("/api/tasks/file", status_code=202)
-    async def file_task(request: Request, file: UploadFile, mode: Mode = Form("fast")):
+    async def file_task(
+        request: Request, file: UploadFile, mode: Mode = Form("fast"), retain_audio: bool = Form(False)
+    ):
         m = get_manager(request)
         try:
             if not file.filename or not file.filename.lower().endswith(".mp4"):
                 raise HTTPException(422, "请选择 MP4 视频文件。")
             ensure_ready(m, mode)
             filename = file.filename.replace("\\", "/").rsplit("/", 1)[-1]
-            task = m.reserve_task(mode, "file", filename)
+            task = m.reserve_task(mode, "file", filename, retain_audio=retain_audio)
             path = m.task_dir(task["id"]) / "input.mp4"
             size = 0
             try:
@@ -271,6 +292,45 @@ def create_app(settings=None, manager=None):
             return get_manager(request).history.get(record_id)
         except KeyError:
             raise HTTPException(404, "文稿不存在或已删除。") from None
+
+    @app.get("/api/history/{record_id}/audio")
+    def history_audio(record_id: str, request: Request):
+        m = get_manager(request)
+        try:
+            if not m.history.get(record_id)["audio_available"]:
+                raise KeyError(record_id)
+            return FileResponse(m.history.audio_path(record_id), media_type="audio/wav")
+        except KeyError:
+            raise HTTPException(404, "回听音频不存在。") from None
+
+    @app.delete("/api/history/{record_id}/audio")
+    def history_audio_delete(record_id: str, request: Request):
+        try:
+            return get_manager(request).clear_audio(record_id)
+        except KeyError:
+            raise HTTPException(404, "文稿不存在。") from None
+
+    @app.patch("/api/history/{record_id}/segments/{segment_id}")
+    def segment_patch(record_id: str, segment_id: int, body: SegmentPatch, request: Request):
+        try:
+            return get_manager(request).history.update_segment(record_id, segment_id, **body.model_dump())
+        except HistoryConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except KeyError:
+            raise HTTPException(404, "分段不存在。") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.post("/api/history/{record_id}/segments/{segment_id}/recognize", status_code=202)
+    def segment_retry(record_id: str, segment_id: int, body: RetryInput, request: Request):
+        m = get_manager(request)
+        ensure_ready(m, body.mode)
+        try:
+            return m.retry_segment(record_id, segment_id, body.revision, body.mode)
+        except HistoryConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except KeyError:
+            raise HTTPException(404, "分段或回听音频不存在。") from None
 
     @app.patch("/api/history/{record_id}")
     def history_patch(record_id: str, body: HistoryPatch, request: Request):

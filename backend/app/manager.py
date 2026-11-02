@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from .config import Settings
-from .history import HistoryStore
+from .history import HistoryConflict, HistoryStore
 
 
 def inspect_model(path: Path) -> dict:
@@ -68,6 +68,7 @@ class JobManager:
         self._model = None
         self._model_mode = "fast"
         self.history = HistoryStore(settings.data_dir / "history.sqlite3")
+        self.expire_audio()
         self._closed = False
         self._cancelled = set()
         self._command_builder = command_builder or (
@@ -121,16 +122,21 @@ class JobManager:
         if (self._task and self._task["status"] == "running") or self._process is not None:
             raise BusyError("已有任务正在处理，请等待完成或取消当前任务。")
 
-    def reserve_task(self, mode="fast", source_type=None, source_ref=None, *, source_title=None) -> dict:
+    def reserve_task(
+        self, mode="fast", source_type=None, source_ref=None, *, source_title=None, retain_audio=False
+    ) -> dict:
         with self._lock:
             self._ensure_available()
             self.settings.model_path(mode)
+            self.expire_audio()
+            self._retain_audio = retain_audio
             self._source_info = (source_type, source_ref)
             self._source_title = source_title
             task_id = uuid.uuid4().hex
             self.task_dir(task_id).mkdir()
             self._task = {
                 "id": task_id,
+                "kind": "task",
                 "mode": mode,
                 "status": "running",
                 "stage": "preparing",
@@ -261,6 +267,13 @@ class JobManager:
                                     ):
                                         raise ValueError("Invalid transcription result")
                                     result = {"text": event["text"], "source": event["source"]}
+                                    if payload["kind"] == "task":
+                                        segments = self.history.validate_segments(event.get("segments", []))
+                                        if segments and event["text"] != "\n".join(
+                                            x["text"] for x in segments
+                                        ):
+                                            raise ValueError("Inconsistent segments")
+                                        result["segments"] = segments
                                 elif event_type == "error":
                                     error = str(event.get("detail", "处理失败，请重试。"))
                     if self._closed or (task_id and task_id in self._cancelled):
@@ -269,15 +282,11 @@ class JobManager:
                 process.wait(timeout=max(0.1, deadline - time.monotonic()))
                 if process.returncode != 0:
                     error = "处理进程意外退出，请重试。"
-        except (ValueError, KeyError, OSError, subprocess.TimeoutExpired):
+        except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
             error = "处理进程异常，请重试；仍失败时可重新启动工具。"
         finally:
             stop_process_group(process)
             process.stdout.close()
-            try:
-                self._remove_directory(Path(payload["work_dir"]))
-            except OSError:
-                error = "临时文件清理失败，请检查磁盘权限后重新启动工具。"
             with self._lock:
                 if task_id:
                     if task_id in self._cancelled or self._closed:
@@ -289,8 +298,20 @@ class JobManager:
                             detail="提取失败",
                             error=error or "没有获得有效文案，请检查视频是否包含清晰语音。",
                         )
+                    elif payload["kind"] == "retry":
+                        self._task.update(
+                            status="completed", stage="completed", detail="局部识别完成", **result
+                        )
                     else:
+                        cache = None
                         try:
+                            audio = Path(payload["work_dir"]) / "audio.wav"
+                            if audio.is_file() and not audio.is_symlink():
+                                cache = self.history.audio_path(task_id)
+                                cache.parent.mkdir(exist_ok=True)
+                                temporary = cache.with_suffix(".tmp")
+                                shutil.copyfile(audio, temporary)
+                                os.replace(temporary, cache)
                             record = self.history.create(
                                 id=task_id,
                                 source_type=self._source_info[0],
@@ -299,8 +320,12 @@ class JobManager:
                                 source=result["source"],
                                 mode=self._task["mode"],
                                 title=self._source_title,
+                                segments=result.get("segments", []),
+                                audio_retained=self._retain_audio,
                             )
                         except (OSError, sqlite3.Error, ValueError):
+                            if cache:
+                                cache.unlink(missing_ok=True)
                             self._task.update(
                                 status="failed",
                                 stage="failed",
@@ -319,6 +344,7 @@ class JobManager:
                     self._model = {"status": "error", "detail": error, "progress": None}
                 else:
                     self._model = None
+                self._remove_directory(Path(payload["work_dir"]))
                 if self._process is process:
                     self._process = None
 
@@ -351,9 +377,73 @@ class JobManager:
 
     def delete_history(self, record_id):
         with self._lock:
+            self._ensure_available()
+            self.clear_audio(record_id)
             self.history.delete(record_id)
             if self._task and self._task.get("history_id") == record_id:
                 self._task = None
+
+    def expire_audio(self):
+        for item in self.history.list():
+            record = self.history.get(item["id"])
+            if not record["audio_retained"]:
+                try:
+                    self.history.audio_path(record["id"]).unlink(missing_ok=True)
+                except KeyError:
+                    pass
+
+    def clear_audio(self, record_id):
+        with self._lock:
+            self._ensure_available()
+            self.history.get(record_id)
+            self.history.audio_path(record_id).unlink(missing_ok=True)
+            return self.history.get(record_id)
+
+    def retry_segment(self, record_id, segment_id, revision, mode):
+        with self._lock:
+            self._ensure_available()
+            record = self.history.get(record_id)
+            if record["revision"] != revision:
+                raise HistoryConflict("文稿已更新，请重新载入。")
+            segment = next((x for x in record["segments"] if x["id"] == segment_id), None)
+            if segment is None or not record["audio_available"]:
+                raise KeyError(record_id)
+            task_id = uuid.uuid4().hex
+            work = self.task_dir(task_id)
+            work.mkdir()
+            try:
+                shutil.copyfile(self.history.audio_path(record_id), work / "source.wav")
+                self._task = dict(
+                    id=task_id,
+                    kind="retry",
+                    history_id=record_id,
+                    segment_id=segment_id,
+                    mode=mode,
+                    status="running",
+                    stage="preparing",
+                    detail="正在局部识别",
+                    text="",
+                    source=None,
+                    error=None,
+                )
+                self._spawn(
+                    dict(
+                        kind="retry",
+                        input=str(work / "source.wav"),
+                        start=segment["start"],
+                        end=segment["end"],
+                        model_dir=str(self.settings.model_path(mode)),
+                        mode=mode,
+                        work_dir=str(work),
+                    ),
+                    task_id,
+                )
+            except Exception:
+                self._remove_directory(work)
+                if self._task and self._task["id"] == task_id:
+                    self._task.update(status="failed", stage="failed")
+                raise
+            return dict(self._task)
 
     def close(self):
         with self._lock:

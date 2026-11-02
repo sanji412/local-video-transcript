@@ -239,3 +239,33 @@ def test_either_model_download_excludes_task_and_other_model(runner, monkeypatch
             runner.start_model_download("fast")
     finally:
         runner._process = None
+
+
+def test_retry_keeps_history_and_preserves_temporary_audio(runner):
+    m = runner
+    record = m.history.create(
+        id="proof",
+        source_type="file",
+        source_ref="x.mp4",
+        text="原稿",
+        source="transcription",
+        mode="fast",
+        segments=[dict(id=0, start=0, end=1, text="原稿")],
+    )
+    audio = m.history.audio_path("proof")
+    audio.parent.mkdir()
+    audio.write_bytes(b"cached audio")
+    task = m.retry_segment("proof", 0, record["revision"], "fast")
+    result = wait_for(m, task["id"], "completed")
+    assert result["kind"] == "retry"
+    assert result["history_id"] == "proof"
+    assert m.history.get("proof")["edited_text"] == "原稿"
+    assert audio.exists()
+    m.reserve_task()
+    assert not audio.exists()
+
+
+def test_clear_audio_blocked_while_reserved(runner):
+    runner.reserve_task()
+    with pytest.raises(BusyError):
+        runner.clear_audio("missing")
